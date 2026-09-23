@@ -1,0 +1,49 @@
+name: Ticket Automation
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:   # lets you trigger it manually from the Actions tab too
+
+concurrency:
+  group: ticket-automation
+  cancel-in-progress: false   # queue instead of overlap if a run is still going
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-chromium
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+
+      - name: Create .env
+        run: |
+          cat > .env << EOF
+          PLATFORM_URL=${{ secrets.PLATFORM_URL }}
+          PLATFORM_USERNAME=${{ secrets.PLATFORM_USERNAME }}
+          PLATFORM_PASSWORD=${{ secrets.PLATFORM_PASSWORD }}
+          HEADLESS=true
+          BROWSER_CHANNEL=
+          EOF
+
+      - name: Run ticket automation (single pass)
+        env:
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+          GOOGLE_TOKEN_JSON: ${{ secrets.GOOGLE_TOKEN_JSON }}
+        run: python run_once.py
