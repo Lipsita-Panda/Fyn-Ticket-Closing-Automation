@@ -386,10 +386,6 @@ def set_location_and_confirm(page, vehicle_number):
 
 
 # ---------------------------------------------------------------------------
-# Main loop
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
 # Main loop (local / VM use — continuous polling)
 # ---------------------------------------------------------------------------
 
@@ -397,7 +393,9 @@ def process_once(service):
     """Run one pass: check for matching unread emails, process each. Used
     both by the continuous local loop below and by run_once.py for
     GitHub Actions, where GitHub's own scheduler handles the waiting."""
-    for msg, ticket in fetch_ticket_emails(service):
+    matches = fetch_ticket_emails(service)
+    print(f"Checked inbox — {len(matches)} matching unread ticket email(s) found.")
+    for msg, ticket in matches:
         vehicle_number = ticket["vehicle_number"]
         remarks = ticket["remarks"]
         print(f"Processing {vehicle_number} — remarks: {remarks!r}")
