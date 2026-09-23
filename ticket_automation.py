@@ -93,13 +93,45 @@ def _extract_field(labels, text):
     return None
 
 
-def parse_ticket_email(body: str):
+_SUBJECT_VEHICLE_RE = re.compile(r"\b([A-Z]{2}\s?\d{1,2}\s?[A-Z]{1,3}\s?\d{4})\b", re.IGNORECASE)
+
+
+def _extract_vehicle_from_subject(subject):
+    match = _SUBJECT_VEHICLE_RE.search(subject or "")
+    return match.group(1).strip() if match else None
+
+
+def _last4_digits(plate):
+    """Just the trailing serial digits (ignoring the district code, which
+    is the part most prone to typos), for comparing two plate strings."""
+    digits = re.sub(r"\D", "", plate or "")
+    return digits[-4:] if len(digits) >= 4 else digits
+
+
+def parse_ticket_email(body: str, subject: str = ""):
     """Pull the fields out of a ticket email body. Returns a dict with
     vehicle_number / remarks / status_text, or None if it's missing the
     vehicle number or nothing indicates the ticket should be closed."""
     vehicle_number = _extract_field(["Vehicle number", "Vehicle no"], body)
     repaired_details = _extract_field(["Repaired details", "Issue"], body)
     status_text = _extract_field("Status", body)
+
+    subject_vehicle = _extract_vehicle_from_subject(subject)
+
+    if not vehicle_number:
+        # Body didn't have a usable vehicle number at all — fall back to
+        # whatever plate-shaped text is in the subject.
+        vehicle_number = subject_vehicle
+    elif subject_vehicle and vehicle_number.replace(" ", "").upper() != subject_vehicle.replace(" ", "").upper():
+        # Body and subject disagree — if the trailing serial digits match
+        # (just the district-code part differs, likely a typo), trust the
+        # subject's version instead.
+        if _last4_digits(vehicle_number) == _last4_digits(subject_vehicle):
+            print(
+                f"  Vehicle number mismatch: body says '{vehicle_number}', "
+                f"subject says '{subject_vehicle}' — using subject's version."
+            )
+            vehicle_number = subject_vehicle
 
     if not vehicle_number:
         return None
@@ -159,7 +191,9 @@ def fetch_ticket_emails(service):
     for stub in stubs:
         msg = service.users().messages().get(userId="me", id=stub["id"], format="full").execute()
         body = _get_plain_text(msg["payload"]) or ""
-        ticket = parse_ticket_email(body)
+        headers = {h["name"]: h["value"] for h in msg["payload"].get("headers", [])}
+        subject = headers.get("Subject", "")
+        ticket = parse_ticket_email(body, subject)
         if ticket is None:
             print(f"[skip] message {stub['id']} — missing fields or status isn't a close instruction")
             mark_processed(service, stub["id"])  # don't keep reprocessing irrelevant mail
