@@ -4,7 +4,7 @@ Automated vehicle-service ticket closer.
 Watches Gmail (via the Gmail API / OAuth) for unread "UNDER APPROVAL Service
 Ticket" emails, parses the vehicle number / repair remarks / status out of
 the body, and if the status says to close it, walks through the platform's
-Change Status flow and replies "Done" on the same thread.
+Change Status flow and replies on the same thread.
 
 Run manually for now:  python ticket_automation.py
 Keep your laptop + this terminal open; it polls on a loop.
@@ -54,7 +54,8 @@ def build_subject_query():
     return f"({subject_clause}) is:unread"
 
 # While True, sends reply emails (close confirmation, already-completed
-# notice, vehicle-number-unclear notice) after processing a ticket.
+# notice, vehicle-number-unclear notice, under-approval notice) after
+# processing a ticket.
 SEND_REPLIES = True
 
 # Vehicle-number prefix -> vendor location dropdown text (Fyn's own regional
@@ -115,6 +116,8 @@ def parse_ticket_email(body: str, subject: str = ""):
       it's a valid close instruction
     - a dict with kind="no_vehicle_number" when neither body nor subject
       had a usable plate number
+    - a dict with kind="under_approval" when the status is specifically
+      "Under Approval"
     - None when it's simply not a close instruction (nothing to do,
       no reply needed)
     """
@@ -163,6 +166,12 @@ def parse_ticket_email(body: str, subject: str = ""):
         )
 
     if not should_close:
+        if "under approval" in status_lower:
+            return {
+                "kind": "under_approval",
+                "vehicle_number": vehicle_number,
+                "status_text": status_text or "",
+            }
         return None
 
     return {
@@ -213,6 +222,17 @@ def fetch_ticket_emails(service):
             print(f"[no vehicle number] message {stub['id']} — asking sender to confirm")
             if SEND_REPLIES:
                 send_reply(service, msg, "Kindly check the vehicle number and confirm")
+            mark_processed(service, stub["id"])
+            continue
+
+        if ticket.get("kind") == "under_approval":
+            vehicle_number = ticket["vehicle_number"]
+            print(f"[under approval] message {stub['id']} — {vehicle_number}")
+            if SEND_REPLIES:
+                send_reply(
+                    service, msg,
+                    f'vehicle number : {vehicle_number}\ncurrent status is "Under Approval", Kindly check and confirm'
+                )
             mark_processed(service, stub["id"])
             continue
 
@@ -461,10 +481,6 @@ def set_location_and_confirm(page, vehicle_number):
     page.get_by_role("button", name="Confirm & Submit").click()
     page.wait_for_load_state("networkidle")
 
-
-# ---------------------------------------------------------------------------
-# Main loop
-# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # Main loop (local / VM use — continuous polling)
