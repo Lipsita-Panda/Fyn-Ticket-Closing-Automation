@@ -54,8 +54,7 @@ def build_subject_query():
     return f"({subject_clause}) is:unread"
 
 # While True, sends reply emails (close confirmation, already-completed
-# notice, vehicle-number-unclear notice, under-approval notice) after
-# processing a ticket.
+# notice, vehicle-number-unclear notice) after processing a ticket.
 SEND_REPLIES = True
 
 # Vehicle-number prefix -> vendor location dropdown text (Fyn's own regional
@@ -116,10 +115,9 @@ def parse_ticket_email(body: str, subject: str = ""):
       it's a valid close instruction
     - a dict with kind="no_vehicle_number" when neither body nor subject
       had a usable plate number
-    - a dict with kind="under_approval" when the status is specifically
-      "Under Approval"
-    - None when it's simply not a close instruction (nothing to do,
-      no reply needed)
+    - a dict with kind="check_platform_status" when it's not a close
+      instruction — the real status gets looked up on the platform rather
+      than trusted from the email text
     """
     vehicle_number = _extract_field(["Vehicle number", "Vehicle no"], body)
     repaired_details = _extract_field(["Repaired details", "Issue"], body)
@@ -166,13 +164,10 @@ def parse_ticket_email(body: str, subject: str = ""):
         )
 
     if not should_close:
-        if "under approval" in status_lower:
-            return {
-                "kind": "under_approval",
-                "vehicle_number": vehicle_number,
-                "status_text": status_text or "",
-            }
-        return None
+        # Not a close instruction — rather than trusting the email's Status
+        # text, ask the platform for the real current status (see
+        # check_platform_status), since the email may be stale or wrong.
+        return {"kind": "check_platform_status", "vehicle_number": vehicle_number}
 
     return {
         "kind": "close",
@@ -225,15 +220,33 @@ def fetch_ticket_emails(service):
             mark_processed(service, stub["id"])
             continue
 
-        if ticket.get("kind") == "under_approval":
+        if ticket.get("kind") == "check_platform_status":
             vehicle_number = ticket["vehicle_number"]
-            print(f"[under approval] message {stub['id']} — {vehicle_number}")
-            if SEND_REPLIES:
-                send_reply(
-                    service, msg,
-                    f'vehicle number : {vehicle_number}\ncurrent status is "Under Approval", Kindly check and confirm'
-                )
-            mark_processed(service, stub["id"])
+            try:
+                found_status = check_vehicle_platform_status(vehicle_number)
+            except Exception as e:
+                print(f"[skip] message {stub['id']} — couldn't check platform status for {vehicle_number}: {e} (left unread)")
+                continue
+
+            if found_status == "Servicing Completed":
+                print(f"[already completed] {vehicle_number}")
+                if SEND_REPLIES:
+                    send_reply(
+                        service, msg,
+                        f'the current status of the vehicle number : {vehicle_number} is already "Servicing Completed" kindly check and confirm'
+                    )
+                mark_processed(service, stub["id"])
+            elif found_status:
+                print(f"[other status] {vehicle_number} — {found_status}")
+                if SEND_REPLIES:
+                    send_reply(
+                        service, msg,
+                        f'the current status of the vehicle number : {vehicle_number} is "{found_status}", kindly check and confirm'
+                    )
+                mark_processed(service, stub["id"])
+            else:
+                print(f"[skip] message {stub['id']} — no record found at all for {vehicle_number} (left unread)")
+                # No reply sent, leave unread.
             continue
 
         matched.append((msg, ticket))
@@ -363,19 +376,71 @@ class AlreadyCompletedError(Exception):
         super().__init__(f"Already {status_text}")
 
 
+class OtherStatusError(Exception):
+    """Raised when a vehicle has no open/in-progress/on-hold record and
+    isn't Servicing Completed either, but IS found under some other status
+    (Under Approval, Rejected, etc.) — also a normal, reportable state."""
+    def __init__(self, status_text):
+        self.status_text = status_text
+        super().__init__(f"Found under status: {status_text}")
+
+
+# Known platform status values (confirmed via the admin's status filter
+# sidebar). The listing rows don't show status text directly, so the only
+# way to find "what status is this plate currently under" is to try each
+# filter in turn and see which one it shows up in.
+STATUS_LABELS = {
+    0: "Open",
+    1: "Servicing In Progress",
+    2: "On Hold",
+    3: "Servicing Completed",
+    4: "Under Approval",
+    5: "Rejected",
+}
+
+
+def _find_status_among(page, vehicle_number, status_nums):
+    for status_num in status_nums:
+        url = (
+            f"{PLATFORM_URL.rstrip('/')}/services/service/"
+            f"?q={quote(vehicle_number)}&status__in={status_num}"
+        )
+        page.goto(url)
+        page.wait_for_load_state("networkidle")
+        rows = page.get_by_role("row").filter(has_text=_plate_regex(vehicle_number))
+        if rows.count() > 0:
+            return STATUS_LABELS[status_num]
+    return None
+
+
 def _check_already_completed(page, vehicle_number):
-    """When no open record was found, check specifically whether a
-    Servicing Completed record exists for this plate, so the sender can be
-    told the real reason instead of just getting a generic error."""
-    completed_url = (
-        f"{PLATFORM_URL.rstrip('/')}/services/service/"
-        f"?q={quote(vehicle_number)}&status__in=3"
-    )
-    page.goto(completed_url)
-    page.wait_for_load_state("networkidle")
-    rows = page.get_by_role("row").filter(has_text=_plate_regex(vehicle_number))
-    if rows.count() > 0:
-        raise AlreadyCompletedError("Servicing Completed")
+    """When no open record was found (during an actual close attempt),
+    check the remaining statuses to report the real reason instead of a
+    generic error: Servicing Completed gets its own specific exception,
+    anything else found gets a generic one."""
+    found_status = _find_status_among(page, vehicle_number, [3, 4, 5])
+    if found_status == "Servicing Completed":
+        raise AlreadyCompletedError(found_status)
+    if found_status:
+        raise OtherStatusError(found_status)
+
+
+def check_vehicle_platform_status(vehicle_number: str):
+    """Lightweight check (login + status lookup only, no closing attempt)
+    for emails that aren't a close instruction — reports the vehicle's real
+    current status rather than trusting the email's own Status text.
+    Returns the status label found, or None if the plate isn't found under
+    any known status at all."""
+    with sync_playwright() as p:
+        launch_kwargs = {"headless": HEADLESS}
+        if BROWSER_CHANNEL:
+            launch_kwargs["channel"] = BROWSER_CHANNEL
+        browser = p.chromium.launch(**launch_kwargs)
+        page = browser.new_page()
+        login(page)
+        status = _find_status_among(page, vehicle_number, [0, 1, 2, 3, 4, 5])
+        browser.close()
+        return status
 
 
 def select_vehicle(page, vehicle_number):
@@ -510,7 +575,15 @@ def process_once(service):
             if SEND_REPLIES:
                 send_reply(
                     service, msg,
-                    f'Vehicle Number : {vehicle_number}\nService status is "{e.status_text}"'
+                    f'the current status of the vehicle number : {vehicle_number} is already "Servicing Completed" kindly check and confirm'
+                )
+            mark_processed(service, msg["id"])
+        except OtherStatusError as e:
+            print(f"  Found under status {e.status_text}: {vehicle_number}")
+            if SEND_REPLIES:
+                send_reply(
+                    service, msg,
+                    f'the current status of the vehicle number : {vehicle_number} is "{e.status_text}", kindly check and confirm'
                 )
             mark_processed(service, msg["id"])
         except Exception as e:
