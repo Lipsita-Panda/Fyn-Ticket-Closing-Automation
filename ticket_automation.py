@@ -4,7 +4,7 @@ Automated vehicle-service ticket closer.
 Watches Gmail (via the Gmail API / OAuth) for unread "UNDER APPROVAL Service
 Ticket" emails, parses the vehicle number / repair remarks / status out of
 the body, and if the status says to close it, walks through the platform's
-Change Status flow and replies "Done" on the same thread.
+Change Status flow and replies on the same thread.
 
 Run manually for now:  python ticket_automation.py
 Keep your laptop + this terminal open; it polls on a loop.
@@ -53,8 +53,9 @@ def build_subject_query():
     subject_clause = " OR ".join(f'subject:"{q}"' for q in SUBJECT_QUERIES)
     return f"({subject_clause}) is:unread"
 
-# While True, sends the "Done" reply after successfully closing a ticket.
-SEND_DONE_REPLY = True
+# While True, sends reply emails (close confirmation, already-completed
+# notice, vehicle-number-unclear notice) after processing a ticket.
+SEND_REPLIES = True
 
 # Vehicle-number prefix -> vendor location dropdown text (Fyn's own regional
 # location, NOT the external garage from the email — confirmed working for
@@ -109,9 +110,14 @@ def _last4_digits(plate):
 
 
 def parse_ticket_email(body: str, subject: str = ""):
-    """Pull the fields out of a ticket email body. Returns a dict with
-    vehicle_number / remarks / status_text, or None if it's missing the
-    vehicle number or nothing indicates the ticket should be closed."""
+    """Pull the fields out of a ticket email body. Returns:
+    - a dict with kind="close" (vehicle_number/remarks/status_text) when
+      it's a valid close instruction
+    - a dict with kind="no_vehicle_number" when neither body nor subject
+      had a usable plate number
+    - None when it's simply not a close instruction (nothing to do,
+      no reply needed)
+    """
     vehicle_number = _extract_field(["Vehicle number", "Vehicle no"], body)
     repaired_details = _extract_field(["Repaired details", "Issue"], body)
     status_text = _extract_field("Status", body)
@@ -134,7 +140,7 @@ def parse_ticket_email(body: str, subject: str = ""):
             vehicle_number = subject_vehicle
 
     if not vehicle_number:
-        return None
+        return {"kind": "no_vehicle_number"}
 
     status_lower = (status_text or "").lower()
     body_lower = body.lower()
@@ -160,6 +166,7 @@ def parse_ticket_email(body: str, subject: str = ""):
         return None
 
     return {
+        "kind": "close",
         "vehicle_number": vehicle_number,
         "remarks": repaired_details or "Issue Resolved",
         "status_text": status_text or "",
@@ -194,10 +201,19 @@ def fetch_ticket_emails(service):
         headers = {h["name"]: h["value"] for h in msg["payload"].get("headers", [])}
         subject = headers.get("Subject", "")
         ticket = parse_ticket_email(body, subject)
+
         if ticket is None:
             print(f"[skip] message {stub['id']} — missing fields or status isn't a close instruction")
             mark_processed(service, stub["id"])  # don't keep reprocessing irrelevant mail
             continue
+
+        if ticket.get("kind") == "no_vehicle_number":
+            print(f"[no vehicle number] message {stub['id']} — asking sender to confirm")
+            if SEND_REPLIES:
+                send_reply(service, msg, "Kindly check the vehicle number and confirm")
+            mark_processed(service, stub["id"])
+            continue
+
         matched.append((msg, ticket))
     return matched
 
@@ -217,9 +233,9 @@ def _dedupe_addrs(addr_list):
     return out
 
 
-def reply_done(service, orig_msg):
-    """Reply All with 'Done' — includes the original sender plus everyone
-    on the original To/Cc, minus our own address."""
+def send_reply(service, orig_msg, body_text):
+    """Reply All with the given text — includes the original sender plus
+    everyone on the original To/Cc, minus our own address."""
     headers = {h["name"]: h["value"] for h in orig_msg["payload"]["headers"]}
     subject = headers.get("Subject", "")
     if not subject.lower().startswith("re:"):
@@ -244,9 +260,9 @@ def reply_done(service, orig_msg):
     if not to_list:
         to_list = _split_addrs(headers.get("From", ""))
 
-    print(f"  Sending Done reply — To: {to_list}  Cc: {cc_list}")
+    print(f"  Sending reply {body_text!r} — To: {to_list}  Cc: {cc_list}")
 
-    reply = MIMEText("Done")
+    reply = MIMEText(body_text)
     reply["To"] = ", ".join(to_list)
     if cc_list:
         reply["Cc"] = ", ".join(cc_list)
@@ -316,6 +332,30 @@ def _plate_regex(vehicle_number):
 from urllib.parse import quote
 
 
+class AlreadyCompletedError(Exception):
+    """Raised when a vehicle has no open/in-progress/on-hold record because
+    it's already Servicing Completed — a normal, reportable state, not a
+    real failure."""
+    def __init__(self, status_text):
+        self.status_text = status_text
+        super().__init__(f"Already {status_text}")
+
+
+def _check_already_completed(page, vehicle_number):
+    """When no open record was found, check specifically whether a
+    Servicing Completed record exists for this plate, so the sender can be
+    told the real reason instead of just getting a generic error."""
+    completed_url = (
+        f"{PLATFORM_URL.rstrip('/')}/services/service/"
+        f"?q={quote(vehicle_number)}&status__in=3"
+    )
+    page.goto(completed_url)
+    page.wait_for_load_state("networkidle")
+    rows = page.get_by_role("row").filter(has_text=_plate_regex(vehicle_number))
+    if rows.count() > 0:
+        raise AlreadyCompletedError("Servicing Completed")
+
+
 def select_vehicle(page, vehicle_number):
     """Go straight to the filtered listing. status__in=0,1,2 means Open,
     Servicing In Progress, On Hold — sidesteps vehicles with multiple
@@ -333,6 +373,7 @@ def select_vehicle(page, vehicle_number):
     print(f"  Matching rows found: {count}")
 
     if count == 0:
+        _check_already_completed(page, vehicle_number)  # raises if it's already done
         page.screenshot(path="debug_no_rows.png")
         raise RuntimeError(f"No open/in-progress/on-hold record found for {vehicle_number}.")
     if count > 1:
@@ -435,10 +476,21 @@ def process_once(service):
         print(f"Processing {vehicle_number} — remarks: {remarks!r}")
         try:
             close_service_ticket(vehicle_number, remarks)
-            if SEND_DONE_REPLY:
-                reply_done(service, msg)
+            if SEND_REPLIES:
+                send_reply(
+                    service, msg,
+                    f'Vehicle Number : {vehicle_number}\nStatus moved to "Servicing Completed"'
+                )
             mark_processed(service, msg["id"])
             print(f"  done: {vehicle_number}")
+        except AlreadyCompletedError as e:
+            print(f"  Already {e.status_text}: {vehicle_number}")
+            if SEND_REPLIES:
+                send_reply(
+                    service, msg,
+                    f'Vehicle Number : {vehicle_number}\nService status is "{e.status_text}"'
+                )
+            mark_processed(service, msg["id"])
         except Exception as e:
             print(f"  FAILED on {vehicle_number}: {e}")
             # Deliberately not marking as read / replying, so a failed
