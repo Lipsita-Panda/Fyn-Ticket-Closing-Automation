@@ -9,6 +9,9 @@ concurrency:
   group: ticket-automation
   cancel-in-progress: false   # queue instead of overlap if a run is still going
 
+permissions:
+  contents: write   # needed to commit the ticket log back to the repo
+
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -47,3 +50,12 @@ jobs:
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
           GOOGLE_TOKEN_JSON: ${{ secrets.GOOGLE_TOKEN_JSON }}
         run: python run_once.py
+
+      - name: Commit ticket log
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add logs/ticket_log.csv
+          git commit -m "Update ticket log" || echo "nothing to commit"
+          git pull --rebase
+          git push
