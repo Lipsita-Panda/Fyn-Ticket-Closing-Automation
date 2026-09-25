@@ -18,6 +18,8 @@ import os
 import re
 import time
 import base64
+import csv
+from datetime import datetime, timezone
 from email.mime.text import MIMEText
 
 from dotenv import load_dotenv
@@ -228,6 +230,7 @@ def fetch_ticket_emails(service):
             if SEND_REPLIES:
                 send_reply(service, msg, "Kindly check the vehicle number and confirm")
             mark_processed(service, stub["id"])
+            log_event("UNKNOWN", "no_vehicle_number")
             continue
 
         if ticket.get("kind") == "vehicle_mismatch":
@@ -239,6 +242,7 @@ def fetch_ticket_emails(service):
                     f'vehicle number : {vehicle_number} is not matching with the subject, Kindly check and confirm'
                 )
             mark_processed(service, stub["id"])
+            log_event(vehicle_number, "vehicle_mismatch")
             continue
 
         matched.append((msg, ticket))
@@ -529,6 +533,30 @@ def set_location_and_confirm(page, vehicle_number):
 # Main loop (local / VM use — continuous polling)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Persistent log (committed back to the repo by the GitHub Actions workflow,
+# so activity survives across runs — see the "Commit log" step in
+# ticket-automation.yml)
+# ---------------------------------------------------------------------------
+
+LOG_FILE = "logs/ticket_log.csv"
+
+
+def log_event(vehicle_number, outcome, detail=""):
+    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+    file_exists = os.path.isfile(LOG_FILE)
+    with open(LOG_FILE, "a", newline="") as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow(["timestamp_utc", "vehicle_number", "outcome", "detail"])
+        writer.writerow([
+            datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            vehicle_number,
+            outcome,
+            detail,
+        ])
+
+
 def process_once(service):
     """Run one pass: check for matching unread emails, process each. Used
     both by the continuous local loop below and by run_once.py for
@@ -547,6 +575,7 @@ def process_once(service):
                     f'Vehicle Number : {vehicle_number}\nStatus moved to "Servicing Completed"'
                 )
             mark_processed(service, msg["id"])
+            log_event(vehicle_number, "closed")
             print(f"  done: {vehicle_number}")
         except AlreadyCompletedError as e:
             print(f"  Already {e.status_text}: {vehicle_number}")
@@ -556,6 +585,7 @@ def process_once(service):
                     f'the current status of the vehicle number : {vehicle_number} is already "Servicing Completed" kindly check and confirm'
                 )
             mark_processed(service, msg["id"])
+            log_event(vehicle_number, "already_completed", e.status_text)
         except OtherStatusError as e:
             print(f"  Found under status {e.status_text}: {vehicle_number}")
             if SEND_REPLIES:
@@ -564,8 +594,10 @@ def process_once(service):
                     f'the current status of the vehicle number : {vehicle_number} is "{e.status_text}", kindly check and confirm'
                 )
             mark_processed(service, msg["id"])
+            log_event(vehicle_number, "other_status", e.status_text)
         except Exception as e:
             print(f"  FAILED on {vehicle_number}: {e}")
+            log_event(vehicle_number, "failed", str(e))
             # Deliberately not marking as read / replying, so a failed
             # ticket isn't silently dropped.
 
