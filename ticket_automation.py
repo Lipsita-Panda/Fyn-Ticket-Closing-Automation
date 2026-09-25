@@ -4,7 +4,7 @@ Automated vehicle-service ticket closer.
 Watches Gmail (via the Gmail API / OAuth) for unread "UNDER APPROVAL Service
 Ticket" emails, parses the vehicle number / repair remarks / status out of
 the body, and if the status says to close it, walks through the platform's
-Change Status flow and replies "Done" on the same thread.
+Change Status flow and replies on the same thread.
 
 Run manually for now:  python ticket_automation.py
 Keep your laptop + this terminal open; it polls on a loop.
@@ -115,9 +115,17 @@ def parse_ticket_email(body: str, subject: str = ""):
       it's a valid close instruction
     - a dict with kind="no_vehicle_number" when neither body nor subject
       had a usable plate number
-    - None when it's simply not a close instruction (nothing to do,
-      no reply needed)
+    - a dict with kind="vehicle_mismatch" when body and subject disagree
+      on the vehicle number and even the last 4 digits don't match
+    - None when it's simply not a close instruction, or the email is a
+      vehicle-replacement request (nothing to do, no reply needed)
     """
+    body_lower_full = body.lower()
+    if "replace the vehicle" in body_lower_full or "replace this vehicle" in body_lower_full:
+        # Vehicle-replacement requests aren't ticket closures — leave
+        # unread, no reply, no action at all.
+        return None
+
     vehicle_number = _extract_field(["Vehicle number", "Vehicle no"], body)
     repaired_details = _extract_field(["Repaired details", "Issue"], body)
     status_text = _extract_field("Status", body)
@@ -129,15 +137,19 @@ def parse_ticket_email(body: str, subject: str = ""):
         # whatever plate-shaped text is in the subject.
         vehicle_number = subject_vehicle
     elif subject_vehicle and vehicle_number.replace(" ", "").upper() != subject_vehicle.replace(" ", "").upper():
-        # Body and subject disagree — if the trailing serial digits match
-        # (just the district-code part differs, likely a typo), trust the
-        # subject's version instead.
+        # Body and subject disagree.
         if _last4_digits(vehicle_number) == _last4_digits(subject_vehicle):
+            # Trailing serial digits still match — just the district-code
+            # part differs, likely a typo — trust the subject's version.
             print(
                 f"  Vehicle number mismatch: body says '{vehicle_number}', "
                 f"subject says '{subject_vehicle}' — using subject's version."
             )
             vehicle_number = subject_vehicle
+        else:
+            # Even the trailing digits disagree — genuinely can't tell
+            # which vehicle this is about.
+            return {"kind": "vehicle_mismatch", "vehicle_number": vehicle_number}
 
     if not vehicle_number:
         return {"kind": "no_vehicle_number"}
@@ -163,10 +175,8 @@ def parse_ticket_email(body: str, subject: str = ""):
         )
 
     if not should_close:
-        # Not a close instruction — rather than trusting the email's Status
-        # text, ask the platform for the real current status (see
-        # check_platform_status), since the email may be stale or wrong.
-        return {"kind": "check_platform_status", "vehicle_number": vehicle_number}
+        # Not a close instruction — leave it, don't touch the platform.
+        return None
 
     return {
         "kind": "close",
@@ -219,33 +229,15 @@ def fetch_ticket_emails(service):
             mark_processed(service, stub["id"])
             continue
 
-        if ticket.get("kind") == "check_platform_status":
+        if ticket.get("kind") == "vehicle_mismatch":
             vehicle_number = ticket["vehicle_number"]
-            try:
-                found_status = check_vehicle_platform_status(vehicle_number)
-            except Exception as e:
-                print(f"[skip] message {stub['id']} — couldn't check platform status for {vehicle_number}: {e} (left unread)")
-                continue
-
-            if found_status == "Servicing Completed":
-                print(f"[already completed] {vehicle_number}")
-                if SEND_REPLIES:
-                    send_reply(
-                        service, msg,
-                        f'the current status of the vehicle number : {vehicle_number} is already "Servicing Completed" kindly check and confirm'
-                    )
-                mark_processed(service, stub["id"])
-            elif found_status:
-                print(f"[other status] {vehicle_number} — {found_status}")
-                if SEND_REPLIES:
-                    send_reply(
-                        service, msg,
-                        f'the current status of the vehicle number : {vehicle_number} is "{found_status}", kindly check and confirm'
-                    )
-                mark_processed(service, stub["id"])
-            else:
-                print(f"[skip] message {stub['id']} — no record found at all for {vehicle_number} (left unread)")
-                # No reply sent, leave unread.
+            print(f"[vehicle mismatch] message {stub['id']} — {vehicle_number} doesn't match subject")
+            if SEND_REPLIES:
+                send_reply(
+                    service, msg,
+                    f'vehicle number : {vehicle_number} is not matching with the subject, Kindly check and confirm'
+                )
+            mark_processed(service, stub["id"])
             continue
 
         matched.append((msg, ticket))
@@ -424,24 +416,6 @@ def _check_already_completed(page, vehicle_number):
         raise OtherStatusError(found_status)
 
 
-def check_vehicle_platform_status(vehicle_number: str):
-    """Lightweight check (login + status lookup only, no closing attempt)
-    for emails that aren't a close instruction — reports the vehicle's real
-    current status rather than trusting the email's own Status text.
-    Returns the status label found, or None if the plate isn't found under
-    any known status at all."""
-    with sync_playwright() as p:
-        launch_kwargs = {"headless": HEADLESS}
-        if BROWSER_CHANNEL:
-            launch_kwargs["channel"] = BROWSER_CHANNEL
-        browser = p.chromium.launch(**launch_kwargs)
-        page = browser.new_page()
-        login(page)
-        status = _find_status_among(page, vehicle_number, [0, 1, 2, 3, 4, 5])
-        browser.close()
-        return status
-
-
 def select_vehicle(page, vehicle_number):
     """Go straight to the filtered listing. status__in=0,1,2 means Open,
     Servicing In Progress, On Hold — sidesteps vehicles with multiple
@@ -545,10 +519,6 @@ def set_location_and_confirm(page, vehicle_number):
     page.get_by_role("button", name="Confirm & Submit").click()
     page.wait_for_load_state("networkidle")
 
-
-# ---------------------------------------------------------------------------
-# Main loop
-# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # Main loop (local / VM use — continuous polling)
