@@ -4,7 +4,7 @@ Automated vehicle-service ticket closer.
 Watches Gmail (via the Gmail API / OAuth) for unread "UNDER APPROVAL Service
 Ticket" emails, parses the vehicle number / repair remarks / status out of
 the body, and if the status says to close it, walks through the platform's
-Change Status flow and replies on the same thread.
+Change Status flow and replies "Done" on the same thread.
 
 Run manually for now:  python ticket_automation.py
 Keep your laptop + this terminal open; it polls on a loop.
@@ -139,8 +139,9 @@ def parse_ticket_email(body: str, subject: str = ""):
     elif subject_vehicle and vehicle_number.replace(" ", "").upper() != subject_vehicle.replace(" ", "").upper():
         # Body and subject disagree.
         if _last4_digits(vehicle_number) == _last4_digits(subject_vehicle):
-            # Trailing serial digits still match — just the district-code
-            # part differs, likely a typo — trust the subject's version.
+            # Trailing serial digits still match — something else earlier
+            # in the plate differs (district number, series letters,
+            # etc.), likely a typo — trust the subject's version.
             print(
                 f"  Vehicle number mismatch: body says '{vehicle_number}', "
                 f"subject says '{subject_vehicle}' — using subject's version."
@@ -519,6 +520,10 @@ def set_location_and_confirm(page, vehicle_number):
     page.get_by_role("button", name="Confirm & Submit").click()
     page.wait_for_load_state("networkidle")
 
+
+# ---------------------------------------------------------------------------
+# Main loop
+# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # Main loop (local / VM use — continuous polling)
