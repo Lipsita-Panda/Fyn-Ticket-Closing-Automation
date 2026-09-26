@@ -48,3 +48,5 @@ timestamp_utc,vehicle_number,outcome,detail
 2026-09-26T12:51:36+00:00,KA 03 AP 8212,closed,
 2026-09-26T12:55:51+00:00,TN 07 DP 2801,vehicle_mismatch,
 2026-09-26T12:56:05+00:00,TN 07 DJ 4264,closed,
+2026-09-26T13:01:55+00:00,TN 07 DK 0762,closed,
+2026-09-26T13:02:08+00:00,TN 13 AF 7329,closed,
