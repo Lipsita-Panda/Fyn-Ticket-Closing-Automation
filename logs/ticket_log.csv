@@ -72,3 +72,4 @@ timestamp_utc,vehicle_number,outcome,detail
 2026-09-28T08:46:30+00:00,KA 04 AD 0130,closed,
 2026-09-28T09:46:16+00:00,TN 14 AP 3742,already_completed,Servicing Completed
 2026-09-28T10:16:37+00:00,KA 04 AD 7786,closed,
+2026-09-28T10:51:03+00:00,TS 08 UL 6751,failed,No open/in-progress/on-hold record found for TS 08 UL 6751.
