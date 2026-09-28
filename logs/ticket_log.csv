@@ -75,3 +75,5 @@ timestamp_utc,vehicle_number,outcome,detail
 2026-09-28T10:51:03+00:00,TS 08 UL 6751,failed,No open/in-progress/on-hold record found for TS 08 UL 6751.
 2026-09-28T10:56:04+00:00,TN 13 AF 7329,closed,
 2026-09-28T10:56:23+00:00,TS 08 UL 6751,closed,
+2026-09-28T11:02:04+00:00,TN 09 DE 3100,closed,
+2026-09-28T11:02:17+00:00,TN 09 DE 3378,closed,
