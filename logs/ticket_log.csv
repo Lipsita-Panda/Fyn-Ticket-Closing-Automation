@@ -83,3 +83,5 @@ timestamp_utc,vehicle_number,outcome,detail
 2026-09-28T11:26:32+00:00,KA 04 AD 3583,closed,
 2026-09-28T11:46:29+00:00,KA 04 AD 0128,already_completed,Servicing Completed
 2026-09-28T12:11:42+00:00,KA 04 AD 5008,closed,
+2026-09-28T13:11:18+00:00,KA 04 AD 7772,closed,
+2026-09-28T13:11:31+00:00,TN 07 DF 8030,closed,
