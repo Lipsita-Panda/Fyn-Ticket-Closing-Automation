@@ -48,6 +48,7 @@ SUBJECT_QUERIES = [
     "UNDER APPROVAL Service Ticket",
     "Service Ticket Status Updated",
     "NEW Service Ticket OPENED",
+    "Service ticket to be closed",
 ]
 
 
@@ -524,14 +525,6 @@ def set_location_and_confirm(page, vehicle_number):
     page.get_by_role("button", name="Confirm & Submit").click()
     page.wait_for_load_state("networkidle")
 
-
-# ---------------------------------------------------------------------------
-# Main loop
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# Main loop (local / VM use — continuous polling)
-# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # Persistent log (committed back to the repo by the GitHub Actions workflow,
