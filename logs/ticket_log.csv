@@ -114,3 +114,7 @@ timestamp_utc,vehicle_number,outcome,detail
 2026-09-29T13:36:04+00:00,KA04 AD 0107,failed,No open/in-progress/on-hold record found for KA04 AD 0107.
 2026-09-29T13:41:23+00:00,TN 07 DJ 4287,closed,
 2026-09-29T13:41:33+00:00,KA04 AD 0107,failed,No open/in-progress/on-hold record found for KA04 AD 0107.
+2026-09-29T13:46:23+00:00,KA 03 AQ 0839,closed,
+2026-09-29T13:46:44+00:00,KA 03 AQ 0833,closed,
+2026-09-29T13:47:03+00:00,KA 03 AN 6670,closed,
+2026-09-29T13:47:14+00:00,KA04 AD 0107,failed,No open/in-progress/on-hold record found for KA04 AD 0107.
