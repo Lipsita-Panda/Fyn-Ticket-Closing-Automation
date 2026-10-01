@@ -158,3 +158,5 @@ timestamp_utc,vehicle_number,outcome,detail
 2026-10-01T07:26:19+00:00,KA 05 AP 5603,closed,
 2026-10-01T08:13:37+00:00,Repaired details :,vehicle_mismatch,
 2026-10-01T08:16:26+00:00,KA 04 AD 3566,closed,
+2026-10-01T09:21:14+00:00,TN 07 DF 7950,closed,
+2026-10-01T09:21:26+00:00,TN 13 AF 7563,closed,
