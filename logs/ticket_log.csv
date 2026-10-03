@@ -198,3 +198,4 @@ timestamp_utc,vehicle_number,outcome,detail
 2026-10-03T12:06:12+00:00,KA 04 AD 3564,closed,
 2026-10-03T12:11:20+00:00,KA 04 AD 0286,closed,
 2026-10-03T12:16:08+00:00,KA 04 AD 6806,already_completed,Servicing Completed
+2026-10-03T12:36:01+00:00,TN 07 DE 0855,closed,
