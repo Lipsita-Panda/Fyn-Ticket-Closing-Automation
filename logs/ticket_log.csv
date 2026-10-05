@@ -238,3 +238,4 @@ timestamp_utc,vehicle_number,outcome,detail
 2026-10-05T13:06:23+00:00,KA 51 AL 3127,closed,
 2026-10-05T13:06:38+00:00,KA 03 AN 6835,closed,
 2026-10-05T13:11:18+00:00,KA 04 AD 3564,closed,
+2026-10-05T13:16:10+00:00,KA 04 AD 3757,vehicle_mismatch,
