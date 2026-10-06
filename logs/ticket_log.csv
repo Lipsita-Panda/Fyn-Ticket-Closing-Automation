@@ -260,3 +260,5 @@ timestamp_utc,vehicle_number,outcome,detail
 2026-10-06T10:11:41+00:00,TN 07 DF 8002,closed,
 2026-10-06T10:31:45+00:00,KA 05 AN 0008,closed,
 2026-10-06T10:35:56+00:00,KA 004 AD 095,vehicle_mismatch,
+2026-10-06T10:41:19+00:00,KA 04 AD 0095,closed,
+2026-10-06T10:41:28+00:00,KA 04 AD 0095,already_completed,Servicing Completed
