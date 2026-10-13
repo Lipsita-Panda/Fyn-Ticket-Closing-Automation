@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: '*/5 * * * *'
   workflow_dispatch:   # lets you trigger it manually from the Actions tab too
+    inputs:
+      send_summary_now:
+        description: "Also email a TEST copy of today's summary right now"
+        type: boolean
+        default: false
 
 concurrency:
   group: ticket-automation
@@ -49,17 +54,20 @@ jobs:
         env:
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
           GOOGLE_TOKEN_JSON: ${{ secrets.GOOGLE_TOKEN_JSON }}
+          DAILY_SUMMARY_TO: ${{ secrets.DAILY_SUMMARY_TO }}
+          DAILY_SUMMARY_HOUR: ${{ vars.DAILY_SUMMARY_HOUR }}
+          DAILY_SUMMARY_FORCE: ${{ inputs.send_summary_now }}
         run: python run_once.py
 
       - name: Commit ticket log
         run: |
-          if [ -f logs/ticket_log.csv ]; then
+          if [ -d logs ]; then
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add logs/ticket_log.csv
+            git add logs/
             git commit -m "Update ticket log" || echo "nothing to commit"
             git pull --rebase
             git push
           else
-            echo "No log file yet — nothing to commit."
+            echo "No logs folder yet — nothing to commit."
           fi
