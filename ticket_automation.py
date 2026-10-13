@@ -77,12 +77,13 @@ SEND_REPLIES = True
 # retried untouched. Flip to True once the flow's been validated.
 RECOVERY_SUBMIT_ENABLED = False
 
-# Independently turn each check on/off — useful locally when testing one
-# without touching the other (e.g. CHECK_SERVICE_TICKETS=false in .env
-# while focused on recovery testing). Both default to on; GitHub Actions
-# doesn't set these, so production always checks both.
+# Independently turn each check on/off. Service tickets are ON by default.
+# Recovery tickets are OFF by default (recovery isn't live yet), so the
+# GitHub Actions run never touches recovery mails. To test recovery locally
+# put these in .env:  CHECK_RECOVERY_TICKETS=true  and (to skip service
+# tickets)  CHECK_SERVICE_TICKETS=false
 CHECK_SERVICE_TICKETS = os.environ.get("CHECK_SERVICE_TICKETS", "true").lower() == "true"
-CHECK_RECOVERY_TICKETS = os.environ.get("CHECK_RECOVERY_TICKETS", "true").lower() == "true"
+CHECK_RECOVERY_TICKETS = os.environ.get("CHECK_RECOVERY_TICKETS", "false").lower() == "true"
 
 # Vehicle-number prefix -> vendor location dropdown text (Fyn's own regional
 # location, NOT the external garage from the email — confirmed working for
@@ -283,6 +284,16 @@ def parse_recovery_email(body: str, subject: str = ""):
     Returns a dict with kind="close" / "no_vehicle_number" /
     "vehicle_mismatch", or None if it's not a close instruction.
     """
+    # First: is this mail actually asking to close a recovery ticket? If not
+    # (notifications, chatter, ...) do nothing at all - no reply, left unread.
+    status_text = _extract_field("Status", body) or ""
+    should_close = (
+        "close the recovery ticket" in status_text.lower()
+        or "close the recovery ticket" in body.lower()
+    )
+    if not should_close:
+        return None
+
     subject_vehicle = _extract_vehicle_from_subject(subject)
     body_vehicle = _extract_field(["Vehicle number", "Vehicle Number"], body)
 
@@ -309,17 +320,6 @@ def parse_recovery_email(body: str, subject: str = ""):
         ["Repaired details", "Remars / Remarks", "Remarks", "Remars"], body
     ) or "Vehicle recovered"
 
-    status_text = _extract_field("Status", body) or ""
-    body_lower = body.lower()
-
-    should_close = (
-        "close the recovery ticket" in status_text.lower()
-        or "close the recovery ticket" in body_lower
-    )
-
-    if not should_close:
-        return None
-
     return {
         "kind": "close",
         "vehicle_number": vehicle_number,
@@ -344,6 +344,11 @@ def fetch_recovery_emails(service):
 
         if ticket is None:
             print(f"[recovery skip] message {stub['id']} — not a close instruction (left unread)")
+            continue
+
+        if not RECOVERY_SUBMIT_ENABLED and ticket.get("kind") in ("no_vehicle_number", "vehicle_mismatch"):
+            # Recovery is still in test mode: no replies to anyone, mail stays unread.
+            print(f"[recovery {ticket['kind']}] message {stub['id']} — test mode, NOT replying (left unread)")
             continue
 
         if ticket.get("kind") == "no_vehicle_number":
