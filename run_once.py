@@ -23,7 +23,14 @@ if os.environ.get("GOOGLE_TOKEN_JSON"):
         f.write(os.environ["GOOGLE_TOKEN_JSON"])
 
 from gmail_auth import get_gmail_service
-from ticket_automation import process_once
+from ticket_automation import process_once, send_daily_summary_if_due
 
 service = get_gmail_service()
 process_once(service)
+
+# The 10 PM daily summary email. Wrapped so a problem here can never stop
+# the ticket processing above.
+try:
+    send_daily_summary_if_due(service)
+except Exception as e:
+    print(f"Daily summary email failed: {e}")
