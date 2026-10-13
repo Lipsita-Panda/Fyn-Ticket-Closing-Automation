@@ -19,7 +19,7 @@ import re
 import time
 import base64
 import csv
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 
 from dotenv import load_dotenv
@@ -56,9 +56,33 @@ def build_subject_query():
     subject_clause = " OR ".join(f'subject:"{q}"' for q in SUBJECT_QUERIES)
     return f"({subject_clause}) is:unread"
 
+
+RECOVERY_SUBJECT_QUERIES = [
+    "Recovery ticket to be closed",
+    "NEW RECOVERY TICKET FOR",
+]
+
+
+def build_recovery_subject_query():
+    subject_clause = " OR ".join(f'subject:"{q}"' for q in RECOVERY_SUBJECT_QUERIES)
+    return f"({subject_clause}) is:unread"
+
 # While True, sends reply emails (close confirmation, already-completed
 # notice, vehicle-number-unclear notice) after processing a ticket.
 SEND_REPLIES = True
+
+# While False, recovery closures fill in the whole form (Type, Status,
+# Remarks, Location) and take a screenshot, but stop short of clicking
+# Submit — nothing gets saved, no reply sent, email stays unread so it's
+# retried untouched. Flip to True once the flow's been validated.
+RECOVERY_SUBMIT_ENABLED = False
+
+# Independently turn each check on/off — useful locally when testing one
+# without touching the other (e.g. CHECK_SERVICE_TICKETS=false in .env
+# while focused on recovery testing). Both default to on; GitHub Actions
+# doesn't set these, so production always checks both.
+CHECK_SERVICE_TICKETS = os.environ.get("CHECK_SERVICE_TICKETS", "true").lower() == "true"
+CHECK_RECOVERY_TICKETS = os.environ.get("CHECK_RECOVERY_TICKETS", "true").lower() == "true"
 
 # Vehicle-number prefix -> vendor location dropdown text (Fyn's own regional
 # location, NOT the external garage from the email — confirmed working for
@@ -244,6 +268,99 @@ def fetch_ticket_emails(service):
                 )
             mark_processed(service, stub["id"])
             log_event(vehicle_number, "vehicle_mismatch")
+            continue
+
+        matched.append((msg, ticket))
+    return matched
+
+
+def parse_recovery_email(body: str, subject: str = ""):
+    """Pull the fields out of a recovery-ticket email. Vehicle number
+    priority is REVERSED from service tickets: subject is checked FIRST,
+    body is only the fallback. Same last-4-digit reconciliation applies
+    when both exist but disagree.
+
+    Returns a dict with kind="close" / "no_vehicle_number" /
+    "vehicle_mismatch", or None if it's not a close instruction.
+    """
+    subject_vehicle = _extract_vehicle_from_subject(subject)
+    body_vehicle = _extract_field(["Vehicle number", "Vehicle Number"], body)
+
+    if not subject_vehicle:
+        vehicle_number = body_vehicle
+    elif not body_vehicle:
+        vehicle_number = subject_vehicle
+    elif subject_vehicle.replace(" ", "").upper() == body_vehicle.replace(" ", "").upper():
+        vehicle_number = subject_vehicle
+    else:
+        if _last4_digits(subject_vehicle) == _last4_digits(body_vehicle):
+            print(
+                f"  Recovery vehicle number mismatch: subject says '{subject_vehicle}', "
+                f"body says '{body_vehicle}' — using subject's version."
+            )
+            vehicle_number = subject_vehicle
+        else:
+            return {"kind": "vehicle_mismatch", "vehicle_number": body_vehicle}
+
+    if not vehicle_number:
+        return {"kind": "no_vehicle_number"}
+
+    remarks = _extract_field(
+        ["Repaired details", "Remars / Remarks", "Remarks", "Remars"], body
+    ) or "Vehicle recovered"
+
+    status_text = _extract_field("Status", body) or ""
+    body_lower = body.lower()
+
+    should_close = (
+        "close the recovery ticket" in status_text.lower()
+        or "close the recovery ticket" in body_lower
+    )
+
+    if not should_close:
+        return None
+
+    return {
+        "kind": "close",
+        "vehicle_number": vehicle_number,
+        "remarks": remarks,
+    }
+
+
+def fetch_recovery_emails(service):
+    """Return a list of (full_message, parsed_ticket) for unread, matching,
+    recovery close-instruction emails."""
+    query = build_recovery_subject_query()
+    results = service.users().messages().list(userId="me", q=query, maxResults=20).execute()
+    stubs = results.get("messages", [])
+
+    matched = []
+    for stub in stubs:
+        msg = service.users().messages().get(userId="me", id=stub["id"], format="full").execute()
+        body = _get_plain_text(msg["payload"]) or ""
+        headers = {h["name"]: h["value"] for h in msg["payload"].get("headers", [])}
+        subject = headers.get("Subject", "")
+        ticket = parse_recovery_email(body, subject)
+
+        if ticket is None:
+            print(f"[recovery skip] message {stub['id']} — not a close instruction (left unread)")
+            continue
+
+        if ticket.get("kind") == "no_vehicle_number":
+            print(f"[recovery no vehicle number] message {stub['id']} — asking sender to confirm")
+            if SEND_REPLIES:
+                send_reply(service, msg, "Kindly check the vehicle number and confirm")
+            mark_processed(service, stub["id"])
+            log_event("UNKNOWN", "recovery_no_vehicle_number")
+            continue
+
+        if ticket.get("kind") == "vehicle_mismatch":
+            vehicle_number = ticket["vehicle_number"]
+            print(f"[recovery vehicle mismatch] message {stub['id']} — {vehicle_number}")
+            if SEND_REPLIES:
+                send_reply(service, msg, "Kindly mention the correct vehicle number in correct format")
+            mark_processed(service, stub["id"])
+            log_event(vehicle_number, "recovery_vehicle_mismatch")
             continue
 
         matched.append((msg, ticket))
@@ -455,6 +572,103 @@ def open_change_status(page):
     page.wait_for_load_state("networkidle")
 
 
+# ---------------------------------------------------------------------------
+# Recovery ticket automation — confirmed-working flow from real recordings
+# ---------------------------------------------------------------------------
+
+# Location is always prefix-based for recovery — never pulled from the
+# email's Vendor name / Warehouse location field, per instruction.
+RECOVERY_LOCATION_DEFAULTS = {
+    "KA": "Fyn Mobility Bangalore",
+    "TN": "Fyn Mobility Chennai",
+    "TG": "Fyn Mobility Hyderabad",
+    "TS": "Fyn Mobility Hyderabad",
+}
+
+
+def recovery_location_for(vehicle_number):
+    prefix = vehicle_number.strip()[:2].upper()
+    try:
+        return RECOVERY_LOCATION_DEFAULTS[prefix]
+    except KeyError:
+        raise ValueError(
+            f"No recovery location mapping for prefix '{prefix}' (vehicle {vehicle_number})."
+        )
+
+
+def select_recovery_vehicle(page, vehicle_number):
+    page.get_by_role("link", name="Vehicle Recoveries").click()
+    page.get_by_role("textbox", name="Search").fill(vehicle_number)
+    page.get_by_role("button", name="Search").click()
+    page.wait_for_load_state("networkidle")
+
+    # Filter to just "Open" recoveries — a plate can have multiple
+    # historical recovery records, and only the open one should be touched.
+    page.get_by_role("link", name="Open").click()
+    page.wait_for_load_state("networkidle")
+
+    rows = page.get_by_role("row").filter(has_text=_plate_regex(vehicle_number))
+    count = rows.count()
+    print(f"  Matching rows found: {count}")
+    if count == 0:
+        raise RuntimeError(f"No open recovery record found for {vehicle_number}.")
+    if count > 1:
+        raise RuntimeError(
+            f"{count} open recovery records found for {vehicle_number} — needs a human to pick the right one."
+        )
+    rows.first.get_by_role("checkbox").check(timeout=10000)
+
+
+def set_recovery_location(page, vehicle_number):
+    location = recovery_location_for(vehicle_number)
+    print(f"  Setting recovery location: {location}")
+    # NOTE: the select2 trigger recorded with an empty accessible label —
+    # unusual, but confirmed working from the real recording.
+    page.get_by_label("", exact=True).click()
+    searchbox = page.get_by_role("searchbox")
+    searchbox.click()
+    searchbox.fill(location)
+
+
+def close_recovery_ticket(vehicle_number: str, remarks: str) -> bool:
+    with sync_playwright() as p:
+        launch_kwargs = {"headless": HEADLESS}
+        if BROWSER_CHANNEL:
+            launch_kwargs["channel"] = BROWSER_CHANNEL
+        browser = p.chromium.launch(**launch_kwargs)
+        page = browser.new_page()
+
+        login(page)
+        select_recovery_vehicle(page, vehicle_number)
+        open_change_status(page)
+
+        # Confirmed: Type* is Soft(0)/Hard(1) — always use Soft. Status* is
+        # Open(0)/Completed(1) — always use Completed when closing.
+        page.get_by_label("Type*", exact=True).select_option(label="Soft")
+        page.get_by_label("Status*").select_option(label="Completed")
+        page.get_by_role("textbox", name="Remarks*").fill(remarks)
+        set_recovery_location(page, vehicle_number)
+
+        page.wait_for_timeout(500)
+        page.screenshot(path="debug_recovery_before_submit.png")
+
+        if not RECOVERY_SUBMIT_ENABLED:
+            print("  RECOVERY_SUBMIT_ENABLED is False — filled the form but did NOT click Submit.")
+            print("  Saved debug_recovery_before_submit.png — check it looks correct.")
+            browser.close()
+            return False
+
+        page.get_by_role("button", name="Submit").click()
+        page.wait_for_load_state("networkidle")
+
+        page.wait_for_timeout(2000)
+        page.screenshot(path="debug_recovery_after_close.png")
+        print("  Saved debug_recovery_after_close.png — check it matches the closed recovery.")
+
+        browser.close()
+        return True
+
+
 def get_status_options(page):
     return page.get_by_label("Status*").locator("option").all_text_contents()
 
@@ -527,6 +741,14 @@ def set_location_and_confirm(page, vehicle_number):
 
 
 # ---------------------------------------------------------------------------
+# Main loop
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Main loop (local / VM use — continuous polling)
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
 # Persistent log (committed back to the repo by the GitHub Actions workflow,
 # so activity survives across runs — see the "Commit log" step in
 # ticket-automation.yml)
@@ -550,54 +772,253 @@ def log_event(vehicle_number, outcome, detail=""):
         ])
 
 
+# ---------------------------------------------------------------------------
+# Daily summary email — sent by the first GitHub Actions run after the set
+# hour (default 10 PM India time). Recipients come from the DAILY_SUMMARY_TO secret (comma
+# separated); if it isn't set, this whole feature stays off.
+# ---------------------------------------------------------------------------
+
+IST = timezone(timedelta(hours=5, minutes=30))
+DAILY_SUMMARY_TO = os.environ.get("DAILY_SUMMARY_TO", "")
+DAILY_SUMMARY_FORCE = os.environ.get("DAILY_SUMMARY_FORCE", "").lower() == "true"
+
+
+def _summary_hour():
+    """Hour of day (India time, 1-23) to send the summary. Set the
+    DAILY_SUMMARY_HOUR variable on GitHub to change it; default 22 = 10 PM."""
+    try:
+        hour = int(os.environ.get("DAILY_SUMMARY_HOUR", "").strip() or 22)
+    except ValueError:
+        return 22
+    return hour if 1 <= hour <= 23 else 22
+
+
+DAILY_SUMMARY_HOUR = _summary_hour()
+SUMMARY_SENT_FILE = "logs/summary_sent.txt"
+
+_FAILED_OUTCOMES = ("failed", "recovery_failed")
+_CLOSED_OUTCOMES = ("closed", "recovery_closed")
+
+
+def _summary_events():
+    """Every log row as (time in India, vehicle, outcome, detail)."""
+    events = []
+    if not os.path.isfile(LOG_FILE):
+        return events
+    with open(LOG_FILE, newline="", encoding="utf-8", errors="replace") as f:
+        for row in csv.DictReader(f):
+            try:
+                when = datetime.fromisoformat(row["timestamp_utc"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            events.append((
+                when.astimezone(IST),
+                (row.get("vehicle_number") or "").strip(),
+                (row.get("outcome") or "").strip(),
+                (row.get("detail") or "").strip(),
+            ))
+    events.sort(key=lambda e: e[0])
+    return events
+
+
+def _plate(vehicle):
+    return re.sub(r"\s+", "", vehicle).upper()
+
+
+def _kind(outcome):
+    return "recovery" if outcome.startswith("recovery_") else "service"
+
+
+def build_daily_summary(day, until):
+    """Subject and body for `day` (India date), from 12 AM up to `until`."""
+    start = datetime(day.year, day.month, day.day, tzinfo=IST)
+    events = _summary_events()
+    todays = [e for e in events if start <= e[0] < until]
+
+    closed = [e for e in todays if e[2] in _CLOSED_OUTCOMES]
+    closed_service = sum(1 for e in closed if _kind(e[2]) == "service")
+    closed_recovery = len(closed) - closed_service
+    replied = [e for e in todays if e[2] not in _CLOSED_OUTCOMES + _FAILED_OUTCOMES]
+
+    # One entry per failed ticket (a failing ticket is retried every 5
+    # minutes, so the same vehicle appears many times in the log).
+    failed = {}
+    for when, vehicle, outcome, detail in todays:
+        if outcome in _FAILED_OUTCOMES:
+            info = failed.setdefault(
+                (_kind(outcome), _plate(vehicle)),
+                {"vehicle": vehicle, "first": when, "reason": ""},
+            )
+            info["reason"] = detail.splitlines()[0][:100] if detail else "(no reason recorded)"
+
+    # A failure only counts as "still failing" if that vehicle wasn't
+    # handled (closed, already completed, ...) afterwards.
+    still_failing = []
+    for key, info in failed.items():
+        handled_later = any(
+            (_kind(o), _plate(v)) == key and o not in _FAILED_OUTCOMES and w >= info["first"]
+            for w, v, o, _d in events
+        )
+        if not handled_later:
+            still_failing.append(info)
+
+    until_text = until.strftime("%I:%M %p").lstrip("0")
+    lines = [
+        f"Ticket automation summary for {day.strftime('%d %b %Y')} "
+        f"(12:00 AM to {until_text}, India time)",
+        "",
+        f"Tickets closed: {len(closed)}  (service {closed_service}, recovery {closed_recovery})",
+    ]
+    if failed:
+        lines.append(f"Failed tickets: {len(failed)}  ({len(still_failing)} still failing)")
+    if replied:
+        lines.append(f"Replied with a question or status notice: {len(replied)}")
+    lines.append("")
+    if closed:
+        lines.append("Closed tickets:")
+        for when, vehicle, outcome, _detail in closed:
+            lines.append(f"  {when:%I:%M %p}  {vehicle}  [{_kind(outcome)}]")
+    else:
+        lines.append("No tickets were closed in this period.")
+    if still_failing:
+        lines += ["", "Still failing (needs a look):"]
+        for info in still_failing:
+            lines.append(f"  {info['vehicle']} - {info['reason']}")
+
+    subject = f"Ticket automation summary - {day.strftime('%d %b %Y')}"
+    return subject, "\n".join(lines)
+
+
+def send_new_email(service, to_addrs, subject, body_text):
+    msg = MIMEText(body_text)
+    msg["To"] = ", ".join(to_addrs)
+    msg["Subject"] = subject
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+    service.users().messages().send(userId="me", body={"raw": raw}).execute()
+
+
+def send_daily_summary_if_due(service, now=None):
+    """Sends today's summary once, in the first run after the set hour (India time).
+    A marker file (committed back to the repo with the log) stops it being
+    sent twice. With DAILY_SUMMARY_FORCE=true it sends a test copy right now."""
+    recipients = [a.strip() for a in DAILY_SUMMARY_TO.split(",") if a.strip()]
+    if not recipients:
+        return
+
+    now = now or datetime.now(IST)
+    today = now.date()
+
+    if DAILY_SUMMARY_FORCE:
+        subject, body = build_daily_summary(today, until=now)
+        send_new_email(service, recipients, subject + " (test)", body)
+        print("  Daily summary: sent a TEST email (forced) — nothing marked as sent.")
+        return
+
+    if now.hour < DAILY_SUMMARY_HOUR:
+        return
+
+    already_sent = []
+    if os.path.isfile(SUMMARY_SENT_FILE):
+        with open(SUMMARY_SENT_FILE) as f:
+            already_sent = f.read().split()
+    # Keyed by date AND hour, so a test send at 1 PM doesn't stop the
+    # real 10 PM mail going out the same day.
+    sent_key = f"{today}@{DAILY_SUMMARY_HOUR}"
+    if sent_key in already_sent:
+        return
+
+    until = datetime(today.year, today.month, today.day, DAILY_SUMMARY_HOUR, tzinfo=IST)
+    subject, body = build_daily_summary(today, until=until)
+    send_new_email(service, recipients, subject, body)
+
+    os.makedirs(os.path.dirname(SUMMARY_SENT_FILE), exist_ok=True)
+    with open(SUMMARY_SENT_FILE, "a") as f:
+        f.write(f"{sent_key}\n")
+    print(f"  Daily summary for {today} (12:00 AM to {until:%I:%M %p}) sent to {', '.join(recipients)}.")
+
+
 def process_once(service):
     """Run one pass: check for matching unread emails, process each. Used
     both by the continuous local loop below and by run_once.py for
     GitHub Actions, where GitHub's own scheduler handles the waiting."""
-    matches = fetch_ticket_emails(service)
-    print(f"Checked inbox — {len(matches)} matching unread ticket email(s) found.")
-    for msg, ticket in matches:
-        vehicle_number = ticket["vehicle_number"]
-        remarks = ticket["remarks"]
-        print(f"Processing {vehicle_number} — remarks: {remarks!r}")
-        try:
-            close_service_ticket(vehicle_number, remarks)
-            if SEND_REPLIES:
-                send_reply(
-                    service, msg,
-                    f'Vehicle Number : {vehicle_number}\nStatus moved to "Servicing Completed"'
-                )
-            mark_processed(service, msg["id"])
-            log_event(vehicle_number, "closed")
-            print(f"  done: {vehicle_number}")
-        except AlreadyCompletedError as e:
-            print(f"  Already {e.status_text}: {vehicle_number}")
-            if SEND_REPLIES:
-                send_reply(
-                    service, msg,
-                    f'the current status of the vehicle number : {vehicle_number} is already "Servicing Completed" kindly check and confirm'
-                )
-            mark_processed(service, msg["id"])
-            log_event(vehicle_number, "already_completed", e.status_text)
-        except OtherStatusError as e:
-            print(f"  Found under status {e.status_text}: {vehicle_number}")
-            if SEND_REPLIES:
-                send_reply(
-                    service, msg,
-                    f'the current status of the vehicle number : {vehicle_number} is "{e.status_text}", kindly check and confirm'
-                )
-            mark_processed(service, msg["id"])
-            log_event(vehicle_number, "other_status", e.status_text)
-        except Exception as e:
-            print(f"  FAILED on {vehicle_number}: {e}")
-            log_event(vehicle_number, "failed", str(e))
-            # Deliberately not marking as read / replying, so a failed
-            # ticket isn't silently dropped.
+    if CHECK_SERVICE_TICKETS:
+        matches = fetch_ticket_emails(service)
+        print(f"Checked inbox — {len(matches)} matching unread ticket email(s) found.")
+        for msg, ticket in matches:
+            vehicle_number = ticket["vehicle_number"]
+            remarks = ticket["remarks"]
+            print(f"Processing {vehicle_number} — remarks: {remarks!r}")
+            try:
+                close_service_ticket(vehicle_number, remarks)
+                if SEND_REPLIES:
+                    send_reply(
+                        service, msg,
+                        f'Vehicle Number : {vehicle_number}\nStatus moved to "Servicing Completed"'
+                    )
+                mark_processed(service, msg["id"])
+                log_event(vehicle_number, "closed")
+                print(f"  done: {vehicle_number}")
+            except AlreadyCompletedError as e:
+                print(f"  Already {e.status_text}: {vehicle_number}")
+                if SEND_REPLIES:
+                    send_reply(
+                        service, msg,
+                        f'the current status of the vehicle number : {vehicle_number} is already "Servicing Completed" kindly check and confirm'
+                    )
+                mark_processed(service, msg["id"])
+                log_event(vehicle_number, "already_completed", e.status_text)
+            except OtherStatusError as e:
+                print(f"  Found under status {e.status_text}: {vehicle_number}")
+                if SEND_REPLIES:
+                    send_reply(
+                        service, msg,
+                        f'the current status of the vehicle number : {vehicle_number} is "{e.status_text}", kindly check and confirm'
+                    )
+                mark_processed(service, msg["id"])
+                log_event(vehicle_number, "other_status", e.status_text)
+            except Exception as e:
+                print(f"  FAILED on {vehicle_number}: {e}")
+                log_event(vehicle_number, "failed", str(e))
+                # Deliberately not marking as read / replying, so a failed
+                # ticket isn't silently dropped.
+
+    if CHECK_RECOVERY_TICKETS:
+        recovery_matches = fetch_recovery_emails(service)
+        print(f"Checked inbox — {len(recovery_matches)} matching unread recovery email(s) found.")
+        for msg, ticket in recovery_matches:
+            vehicle_number = ticket["vehicle_number"]
+            remarks = ticket["remarks"]
+            print(f"Processing recovery {vehicle_number} — remarks: {remarks!r}")
+            try:
+                submitted = close_recovery_ticket(vehicle_number, remarks)
+                if not submitted:
+                    # RECOVERY_SUBMIT_ENABLED is off — nothing was actually
+                    # saved, so no reply and leave unread for a real retry
+                    # once the toggle is switched on.
+                    continue
+                if SEND_REPLIES:
+                    send_reply(service, msg, "Done")
+                mark_processed(service, msg["id"])
+                log_event(vehicle_number, "recovery_closed")
+                print(f"  recovery done: {vehicle_number}")
+            except Exception as e:
+                print(f"  RECOVERY FAILED on {vehicle_number}: {e}")
+                log_event(vehicle_number, "recovery_failed", str(e))
+                # Deliberately not marking as read / replying, per instruction:
+                # if not closed, leave it unread.
 
 
 def main():
     service = get_gmail_service()
-    print("Watching inbox for service-ticket emails... (Ctrl+C to stop)")
+    checks = []
+    if CHECK_SERVICE_TICKETS:
+        checks.append("service tickets")
+    if CHECK_RECOVERY_TICKETS:
+        checks.append("recovery tickets")
+    checks_text = " and ".join(checks) if checks else "nothing — both checks are disabled"
+    print(f"Watching inbox for {checks_text}... (Ctrl+C to stop)")
     while True:
         try:
             process_once(service)
