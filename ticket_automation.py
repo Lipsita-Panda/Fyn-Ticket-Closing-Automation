@@ -19,6 +19,7 @@ import re
 import time
 import base64
 import csv
+import io
 from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 
@@ -775,27 +776,36 @@ def set_location_and_confirm(page, vehicle_number):
 
 LOG_FILE = "logs/ticket_log.csv"
 
-# The first four columns are the original ones, in the original order, so
-# daily_summary.py and any Google Sheet formulas keep working. The rest were
-# added later (older rows simply have them blank).
+# Newest entries are at the TOP of the file. Date and time are separate
+# columns (India time). timestamp_utc - when the entry was written - is kept
+# as the LAST column because the reports read it by name.
 # NOTE: the sender's address is deliberately NOT logged - this repo is public.
 LOG_COLUMNS = [
-    "timestamp_utc", "vehicle_number", "outcome", "detail",
-    "ticket_type",        # service / recovery
-    "mail_received_ist",  # when the mail reached the inbox (India time)
-    "mail_read_ist",      # when the automation read it (India time)
+    "date_ist",             # date the automation read the mail (India time)
+    "time_ist",             # time the automation read the mail (India time)
+    "vehicle_number",
+    "outcome",
+    "detail",               # error text / status notice, if any
+    "ticket_type",          # service / recovery
+    "mail_received_date",   # when the mail reached the inbox (India time)
+    "mail_received_time",
     "mail_subject",
-    "mail_location",      # the "Location :" line in the mail
-    "vendor_name",        # the "Vendor name :" line in the mail
-    "repaired_details",   # the remarks the automation typed into the platform
-    "mail_status",        # the "Status :" line in the mail
-    "platform_location",  # the location the automation selected on the platform
-    "mail_id",            # Gmail message id (ties repeated retries together)
+    "mail_location",        # the "Location :" line in the mail
+    "vendor_name",          # the "Vendor name :" line in the mail
+    "repaired_details",     # the remarks the automation typed into the platform
+    "mail_status",          # the "Status :" line in the mail
+    "platform_location",    # the location the automation selected on the platform
+    "mail_id",              # Gmail message id (ties repeated retries together)
+    "timestamp_utc",
 ]
 
 
-def _ist_text(dt):
-    return dt.astimezone(IST).strftime("%Y-%m-%d %H:%M:%S")
+def _ist_date(dt):
+    return dt.astimezone(IST).strftime("%Y-%m-%d")
+
+
+def _ist_time(dt):
+    return dt.astimezone(IST).strftime("%H:%M:%S")
 
 
 def _line_field(labels, text):
@@ -817,14 +827,18 @@ def _location_text(location_for, vehicle_number):
 
 def _mail_log_info(msg, body, subject, ticket_type):
     """The extra columns that describe the mail itself."""
+    read_at = datetime.now(timezone.utc)
     try:
-        received = _ist_text(datetime.fromtimestamp(int(msg["internalDate"]) / 1000, tz=timezone.utc))
+        received = datetime.fromtimestamp(int(msg["internalDate"]) / 1000, tz=timezone.utc)
+        received_date, received_time = _ist_date(received), _ist_time(received)
     except (KeyError, TypeError, ValueError):
-        received = ""
+        received_date = received_time = ""
     return {
+        "date_ist": _ist_date(read_at),
+        "time_ist": _ist_time(read_at),
         "ticket_type": ticket_type,
-        "mail_received_ist": received,
-        "mail_read_ist": _ist_text(datetime.now(timezone.utc)),
+        "mail_received_date": received_date,
+        "mail_received_time": received_time,
         "mail_subject": subject,
         "mail_location": _line_field(["Location", "Warehouse location"], body) or "",
         "vendor_name": _line_field(["Vendor name"], body) or "",
@@ -833,37 +847,82 @@ def _mail_log_info(msg, body, subject, ticket_type):
     }
 
 
-def _ensure_log_header():
-    """An older log only has the first four columns. Swap in the full
-    header; the older rows are left alone (they just have blank new cells)."""
-    if not os.path.isfile(LOG_FILE):
+def _write_atomic(path, text):
+    """Write via a temp file so a crash can never leave a half-written log."""
+    tmp = path + ".tmp"
+    with open(tmp, "w", newline="", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def _upgrade_row(old):
+    """A row from an older log layout -> the current layout."""
+    new = {col: (old.get(col) or "") for col in LOG_COLUMNS}
+    if new["timestamp_utc"] and not new["date_ist"]:
+        read = (old.get("mail_read_ist") or "").strip()   # layout used briefly before
+        if " " in read:
+            new["date_ist"], new["time_ist"] = read.split(" ", 1)
+        else:
+            try:
+                dt = datetime.fromisoformat(new["timestamp_utc"])
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                new["date_ist"], new["time_ist"] = _ist_date(dt), _ist_time(dt)
+            except ValueError:
+                pass
+    received = (old.get("mail_received_ist") or "").strip()
+    if " " in received and not new["mail_received_date"]:
+        new["mail_received_date"], new["mail_received_time"] = received.split(" ", 1)
+    return new
+
+
+def _ensure_log_layout():
+    """If the log is in an older layout (4 columns, or the first 14-column
+    one), rebuild it once in the current layout, newest first. Every value
+    is kept; date/time columns are worked out from the old timestamp."""
+    if not os.path.isfile(LOG_FILE) or os.path.getsize(LOG_FILE) == 0:
         return
     with open(LOG_FILE, newline="", encoding="utf-8", errors="replace") as f:
         content = f.read()
-    header_line, _, rest = content.partition("\n")
-    wanted = ",".join(LOG_COLUMNS)
-    if header_line.rstrip("\r") == wanted or not header_line.startswith("timestamp_utc"):
+    header_line = content.partition("\n")[0].rstrip("\r")
+    if header_line == ",".join(LOG_COLUMNS) or not header_line.startswith(("timestamp_utc", "date_ist")):
         return
-    with open(LOG_FILE, "w", newline="", encoding="utf-8") as f:
-        f.write(wanted + "\r\n" + rest)
+    rows = [_upgrade_row(r) for r in csv.DictReader(io.StringIO(content, newline=""))]
+    rows.sort(key=lambda r: r["timestamp_utc"], reverse=True)   # ISO UTC text sorts by time
+    buf = io.StringIO(newline="")
+    writer = csv.writer(buf)
+    writer.writerow(LOG_COLUMNS)
+    for r in rows:
+        writer.writerow([r[col] for col in LOG_COLUMNS])
+    _write_atomic(LOG_FILE, buf.getvalue())
 
 
 def log_event(vehicle_number, outcome, detail="", info=None):
+    """Add one entry at the TOP of the log (just under the header row)."""
     os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
-    _ensure_log_header()
-    needs_header = not os.path.isfile(LOG_FILE) or os.path.getsize(LOG_FILE) == 0
+    _ensure_log_layout()
+    now = datetime.now(timezone.utc)
     row = {
-        "timestamp_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "date_ist": _ist_date(now),
+        "time_ist": _ist_time(now),
         "vehicle_number": vehicle_number,
         "outcome": outcome,
         "detail": detail,
         **(info or {}),
+        "timestamp_utc": now.isoformat(timespec="seconds"),
     }
-    with open(LOG_FILE, "a", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        if needs_header:
-            writer.writerow(LOG_COLUMNS)
-        writer.writerow([row.get(col, "") for col in LOG_COLUMNS])
+    buf = io.StringIO(newline="")
+    csv.writer(buf).writerow([row.get(col, "") for col in LOG_COLUMNS])
+    line = buf.getvalue()
+
+    if os.path.isfile(LOG_FILE) and os.path.getsize(LOG_FILE) > 0:
+        with open(LOG_FILE, newline="", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+        header, _, rest = content.partition("\n")
+        text = header + "\n" + line + rest
+    else:
+        text = ",".join(LOG_COLUMNS) + "\r\n" + line
+    _write_atomic(LOG_FILE, text)
 
 
 # ---------------------------------------------------------------------------
