@@ -256,22 +256,26 @@ def fetch_ticket_emails(service):
 
         if ticket.get("kind") == "no_vehicle_number":
             print(f"[no vehicle number] message {stub['id']} — asking sender to confirm")
+            times = {}
             if SEND_REPLIES:
                 send_reply(service, msg, "Kindly check the vehicle number and confirm")
+                times.update(_stamp("replied"))
             mark_processed(service, stub["id"])
-            log_event("UNKNOWN", "no_vehicle_number", info=mail_info)
+            log_event("UNKNOWN", "no_vehicle_number", info={**mail_info, **times})
             continue
 
         if ticket.get("kind") == "vehicle_mismatch":
             vehicle_number = ticket["vehicle_number"]
             print(f"[vehicle mismatch] message {stub['id']} — {vehicle_number} doesn't match subject")
+            times = {}
             if SEND_REPLIES:
                 send_reply(
                     service, msg,
                     f'vehicle number : {vehicle_number} is not matching with the subject, Kindly check and confirm'
                 )
+                times.update(_stamp("replied"))
             mark_processed(service, stub["id"])
-            log_event(vehicle_number, "vehicle_mismatch", info=mail_info)
+            log_event(vehicle_number, "vehicle_mismatch", info={**mail_info, **times})
             continue
 
         ticket["log_info"] = {
@@ -363,19 +367,23 @@ def fetch_recovery_emails(service):
 
         if ticket.get("kind") == "no_vehicle_number":
             print(f"[recovery no vehicle number] message {stub['id']} — asking sender to confirm")
+            times = {}
             if SEND_REPLIES:
                 send_reply(service, msg, "Kindly check the vehicle number and confirm")
+                times.update(_stamp("replied"))
             mark_processed(service, stub["id"])
-            log_event("UNKNOWN", "recovery_no_vehicle_number", info=mail_info)
+            log_event("UNKNOWN", "recovery_no_vehicle_number", info={**mail_info, **times})
             continue
 
         if ticket.get("kind") == "vehicle_mismatch":
             vehicle_number = ticket["vehicle_number"]
             print(f"[recovery vehicle mismatch] message {stub['id']} — {vehicle_number}")
+            times = {}
             if SEND_REPLIES:
                 send_reply(service, msg, "Kindly mention the correct vehicle number in correct format")
+                times.update(_stamp("replied"))
             mark_processed(service, stub["id"])
-            log_event(vehicle_number, "recovery_vehicle_mismatch", info=mail_info)
+            log_event(vehicle_number, "recovery_vehicle_mismatch", info={**mail_info, **times})
             continue
 
         ticket["log_info"] = {
@@ -789,6 +797,10 @@ LOG_COLUMNS = [
     "ticket_type",          # service / recovery
     "mail_received_date",   # when the mail reached the inbox (India time)
     "mail_received_time",
+    "closed_date",          # when the ticket was closed on the platform (blank if it wasn't)
+    "closed_time",
+    "replied_date",         # when the automation sent its reply (blank if it didn't reply)
+    "replied_time",
     "mail_subject",
     "mail_location",        # the "Location :" line in the mail
     "vendor_name",          # the "Vendor name :" line in the mail
@@ -806,6 +818,17 @@ def _ist_date(dt):
 
 def _ist_time(dt):
     return dt.astimezone(IST).strftime("%H:%M:%S")
+
+
+def _stamp(prefix):
+    """The current moment as {prefix_date, prefix_time} (India time)."""
+    now = datetime.now(timezone.utc)
+    return {f"{prefix}_date": _ist_date(now), f"{prefix}_time": _ist_time(now)}
+
+
+def _with_times(ticket, times):
+    """The ticket's mail details plus the closed/replied times so far."""
+    return {**(ticket.get("log_info") or {}), **times}
 
 
 def _line_field(labels, text):
@@ -1096,6 +1119,13 @@ def process_once(service):
     """Run one pass: check for matching unread emails, process each. Used
     both by the continuous local loop below and by run_once.py for
     GitHub Actions, where GitHub's own scheduler handles the waiting."""
+    # Bring the log up to the current column layout right away, so a layout
+    # change shows up on the next run instead of waiting for a ticket.
+    try:
+        _ensure_log_layout()
+    except Exception as e:
+        print(f"  (couldn't update the log layout this time: {e})")
+
     if CHECK_SERVICE_TICKETS:
         matches = fetch_ticket_emails(service)
         print(f"Checked inbox — {len(matches)} matching unread ticket email(s) found.")
@@ -1103,15 +1133,18 @@ def process_once(service):
             vehicle_number = ticket["vehicle_number"]
             remarks = ticket["remarks"]
             print(f"Processing {vehicle_number} — remarks: {remarks!r}")
+            times = {}
             try:
                 close_service_ticket(vehicle_number, remarks)
+                times.update(_stamp("closed"))
                 if SEND_REPLIES:
                     send_reply(
                         service, msg,
                         f'Vehicle Number : {vehicle_number}\nStatus moved to "Servicing Completed"'
                     )
+                    times.update(_stamp("replied"))
                 mark_processed(service, msg["id"])
-                log_event(vehicle_number, "closed", info=ticket.get("log_info"))
+                log_event(vehicle_number, "closed", info=_with_times(ticket, times))
                 print(f"  done: {vehicle_number}")
             except AlreadyCompletedError as e:
                 print(f"  Already {e.status_text}: {vehicle_number}")
@@ -1120,8 +1153,9 @@ def process_once(service):
                         service, msg,
                         f'the current status of the vehicle number : {vehicle_number} is already "Servicing Completed" kindly check and confirm'
                     )
+                    times.update(_stamp("replied"))
                 mark_processed(service, msg["id"])
-                log_event(vehicle_number, "already_completed", e.status_text, info=ticket.get("log_info"))
+                log_event(vehicle_number, "already_completed", e.status_text, info=_with_times(ticket, times))
             except OtherStatusError as e:
                 print(f"  Found under status {e.status_text}: {vehicle_number}")
                 if SEND_REPLIES:
@@ -1129,11 +1163,12 @@ def process_once(service):
                         service, msg,
                         f'the current status of the vehicle number : {vehicle_number} is "{e.status_text}", kindly check and confirm'
                     )
+                    times.update(_stamp("replied"))
                 mark_processed(service, msg["id"])
-                log_event(vehicle_number, "other_status", e.status_text, info=ticket.get("log_info"))
+                log_event(vehicle_number, "other_status", e.status_text, info=_with_times(ticket, times))
             except Exception as e:
                 print(f"  FAILED on {vehicle_number}: {e}")
-                log_event(vehicle_number, "failed", str(e), info=ticket.get("log_info"))
+                log_event(vehicle_number, "failed", str(e), info=_with_times(ticket, times))
                 # Deliberately not marking as read / replying, so a failed
                 # ticket isn't silently dropped.
 
@@ -1144,6 +1179,7 @@ def process_once(service):
             vehicle_number = ticket["vehicle_number"]
             remarks = ticket["remarks"]
             print(f"Processing recovery {vehicle_number} — remarks: {remarks!r}")
+            times = {}
             try:
                 submitted = close_recovery_ticket(vehicle_number, remarks)
                 if not submitted:
@@ -1151,14 +1187,16 @@ def process_once(service):
                     # saved, so no reply and leave unread for a real retry
                     # once the toggle is switched on.
                     continue
+                times.update(_stamp("closed"))
                 if SEND_REPLIES:
                     send_reply(service, msg, "Done")
+                    times.update(_stamp("replied"))
                 mark_processed(service, msg["id"])
-                log_event(vehicle_number, "recovery_closed", info=ticket.get("log_info"))
+                log_event(vehicle_number, "recovery_closed", info=_with_times(ticket, times))
                 print(f"  recovery done: {vehicle_number}")
             except Exception as e:
                 print(f"  RECOVERY FAILED on {vehicle_number}: {e}")
-                log_event(vehicle_number, "recovery_failed", str(e), info=ticket.get("log_info"))
+                log_event(vehicle_number, "recovery_failed", str(e), info=_with_times(ticket, times))
                 # Deliberately not marking as read / replying, per instruction:
                 # if not closed, leave it unread.
 
