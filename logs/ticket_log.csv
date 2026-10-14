@@ -1,4 +1,4 @@
-timestamp_utc,vehicle_number,outcome,detail
+timestamp_utc,vehicle_number,outcome,detail,ticket_type,mail_received_ist,mail_read_ist,mail_subject,mail_location,vendor_name,repaired_details,mail_status,platform_location,mail_id
 2026-09-25T07:46:23+00:00,TN 07 DF 7905,closed,
 2026-09-25T08:41:25+00:00,TN 07 DE 0894,closed,
 2026-09-25T08:46:29+00:00,KA 51 AK 5001,closed,
@@ -498,3 +498,7 @@ Call log:
 2026-10-14T12:11:33+00:00,KA 05 AQ 3761,closed,
 2026-10-14T12:16:44+00:00,TN 07 DE 0829,closed,
 2026-10-14T12:17:07+00:00,KA 03 AN 6733,closed,
+2026-10-14T12:41:25+00:00,TN 14 AP 4770,closed,,service,2026-10-14 18:10:28,2026-10-14 18:11:04,Re: UNDER APPROVAL Service Ticket – TN 14 AP 4770 (Mahindra),Porur,Mahindra,Aux battery getting charged,Close the service ticket and add this vehicle back to the roster.,Vendor - Fyn Mobility Chennai,1a13a6de7a44e69c
+2026-10-14T12:41:44+00:00,TN 14 AS 8863,closed,,service,2026-10-14 18:09:26,2026-10-14 18:11:04,Re: UNDER APPROVAL Service Ticket – TN 14 AS 8863 (Mahindra),Ekkattuthangal,Mahindra,Aux battery getting charged,Close the service ticket and add this vehicle back to the roster.,Vendor - Fyn Mobility Chennai,1a13a6cef12d3bdd
+2026-10-14T12:42:04+00:00,TN 14 AP 3751,closed,,service,2026-10-14 18:07:39,2026-10-14 18:11:04,Re: UNDER APPROVAL Service Ticket – TN 14 AP 3751 (Mahindra),Ekkattuthangal,Mahindra,Tire changed,Close the service ticket and add this vehicle back to the roster.,Vendor - Fyn Mobility Chennai,1a13a6b5761cf396
+2026-10-14T12:42:26+00:00,TN 14 AS 6697,closed,,service,2026-10-14 18:06:14,2026-10-14 18:11:04,Re: UNDER APPROVAL Service Ticket – TN 14 AS 6697 (Mahindra),Porur,Mahindra,Fork adjustment done,Close the service ticket and add this vehicle back to the roster.,Vendor - Fyn Mobility Chennai,1a13a6a094a6fe73
