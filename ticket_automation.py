@@ -251,12 +251,14 @@ def fetch_ticket_emails(service):
             # a follow-up reply changes the status to something actionable.
             continue
 
+        mail_info = _mail_log_info(msg, body, subject, "service")
+
         if ticket.get("kind") == "no_vehicle_number":
             print(f"[no vehicle number] message {stub['id']} — asking sender to confirm")
             if SEND_REPLIES:
                 send_reply(service, msg, "Kindly check the vehicle number and confirm")
             mark_processed(service, stub["id"])
-            log_event("UNKNOWN", "no_vehicle_number")
+            log_event("UNKNOWN", "no_vehicle_number", info=mail_info)
             continue
 
         if ticket.get("kind") == "vehicle_mismatch":
@@ -268,9 +270,14 @@ def fetch_ticket_emails(service):
                     f'vehicle number : {vehicle_number} is not matching with the subject, Kindly check and confirm'
                 )
             mark_processed(service, stub["id"])
-            log_event(vehicle_number, "vehicle_mismatch")
+            log_event(vehicle_number, "vehicle_mismatch", info=mail_info)
             continue
 
+        ticket["log_info"] = {
+            **mail_info,
+            "repaired_details": ticket["remarks"],
+            "platform_location": _location_text(vendor_location_for, ticket["vehicle_number"]),
+        }
         matched.append((msg, ticket))
     return matched
 
@@ -346,6 +353,8 @@ def fetch_recovery_emails(service):
             print(f"[recovery skip] message {stub['id']} — not a close instruction (left unread)")
             continue
 
+        mail_info = _mail_log_info(msg, body, subject, "recovery")
+
         if not RECOVERY_SUBMIT_ENABLED and ticket.get("kind") in ("no_vehicle_number", "vehicle_mismatch"):
             # Recovery is still in test mode: no replies to anyone, mail stays unread.
             print(f"[recovery {ticket['kind']}] message {stub['id']} — test mode, NOT replying (left unread)")
@@ -356,7 +365,7 @@ def fetch_recovery_emails(service):
             if SEND_REPLIES:
                 send_reply(service, msg, "Kindly check the vehicle number and confirm")
             mark_processed(service, stub["id"])
-            log_event("UNKNOWN", "recovery_no_vehicle_number")
+            log_event("UNKNOWN", "recovery_no_vehicle_number", info=mail_info)
             continue
 
         if ticket.get("kind") == "vehicle_mismatch":
@@ -365,9 +374,14 @@ def fetch_recovery_emails(service):
             if SEND_REPLIES:
                 send_reply(service, msg, "Kindly mention the correct vehicle number in correct format")
             mark_processed(service, stub["id"])
-            log_event(vehicle_number, "recovery_vehicle_mismatch")
+            log_event(vehicle_number, "recovery_vehicle_mismatch", info=mail_info)
             continue
 
+        ticket["log_info"] = {
+            **mail_info,
+            "repaired_details": ticket["remarks"],
+            "platform_location": _location_text(recovery_location_for, ticket["vehicle_number"]),
+        }
         matched.append((msg, ticket))
     return matched
 
@@ -761,20 +775,95 @@ def set_location_and_confirm(page, vehicle_number):
 
 LOG_FILE = "logs/ticket_log.csv"
 
+# The first four columns are the original ones, in the original order, so
+# daily_summary.py and any Google Sheet formulas keep working. The rest were
+# added later (older rows simply have them blank).
+# NOTE: the sender's address is deliberately NOT logged - this repo is public.
+LOG_COLUMNS = [
+    "timestamp_utc", "vehicle_number", "outcome", "detail",
+    "ticket_type",        # service / recovery
+    "mail_received_ist",  # when the mail reached the inbox (India time)
+    "mail_read_ist",      # when the automation read it (India time)
+    "mail_subject",
+    "mail_location",      # the "Location :" line in the mail
+    "vendor_name",        # the "Vendor name :" line in the mail
+    "repaired_details",   # the remarks the automation typed into the platform
+    "mail_status",        # the "Status :" line in the mail
+    "platform_location",  # the location the automation selected on the platform
+    "mail_id",            # Gmail message id (ties repeated retries together)
+]
 
-def log_event(vehicle_number, outcome, detail=""):
+
+def _ist_text(dt):
+    return dt.astimezone(IST).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _line_field(labels, text):
+    """Like _extract_field, but never reads onto the next line - an empty
+    'Location :' stays empty instead of picking up the line below it."""
+    for label in labels:
+        for m in re.finditer(rf"{re.escape(label)}[ \t]*:[ \t]*(.*)", text, re.IGNORECASE):
+            if m.group(1).strip():
+                return m.group(1).strip()
+    return None
+
+
+def _location_text(location_for, vehicle_number):
+    try:
+        return location_for(vehicle_number)
+    except ValueError:
+        return ""
+
+
+def _mail_log_info(msg, body, subject, ticket_type):
+    """The extra columns that describe the mail itself."""
+    try:
+        received = _ist_text(datetime.fromtimestamp(int(msg["internalDate"]) / 1000, tz=timezone.utc))
+    except (KeyError, TypeError, ValueError):
+        received = ""
+    return {
+        "ticket_type": ticket_type,
+        "mail_received_ist": received,
+        "mail_read_ist": _ist_text(datetime.now(timezone.utc)),
+        "mail_subject": subject,
+        "mail_location": _line_field(["Location", "Warehouse location"], body) or "",
+        "vendor_name": _line_field(["Vendor name"], body) or "",
+        "mail_status": _line_field(["Status"], body) or "",
+        "mail_id": msg.get("id", ""),
+    }
+
+
+def _ensure_log_header():
+    """An older log only has the first four columns. Swap in the full
+    header; the older rows are left alone (they just have blank new cells)."""
+    if not os.path.isfile(LOG_FILE):
+        return
+    with open(LOG_FILE, newline="", encoding="utf-8", errors="replace") as f:
+        content = f.read()
+    header_line, _, rest = content.partition("\n")
+    wanted = ",".join(LOG_COLUMNS)
+    if header_line.rstrip("\r") == wanted or not header_line.startswith("timestamp_utc"):
+        return
+    with open(LOG_FILE, "w", newline="", encoding="utf-8") as f:
+        f.write(wanted + "\r\n" + rest)
+
+
+def log_event(vehicle_number, outcome, detail="", info=None):
     os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
-    file_exists = os.path.isfile(LOG_FILE)
-    with open(LOG_FILE, "a", newline="") as f:
+    _ensure_log_header()
+    needs_header = not os.path.isfile(LOG_FILE) or os.path.getsize(LOG_FILE) == 0
+    row = {
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "vehicle_number": vehicle_number,
+        "outcome": outcome,
+        "detail": detail,
+        **(info or {}),
+    }
+    with open(LOG_FILE, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        if not file_exists:
-            writer.writerow(["timestamp_utc", "vehicle_number", "outcome", "detail"])
-        writer.writerow([
-            datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            vehicle_number,
-            outcome,
-            detail,
-        ])
+        if needs_header:
+            writer.writerow(LOG_COLUMNS)
+        writer.writerow([row.get(col, "") for col in LOG_COLUMNS])
 
 
 # ---------------------------------------------------------------------------
@@ -963,7 +1052,7 @@ def process_once(service):
                         f'Vehicle Number : {vehicle_number}\nStatus moved to "Servicing Completed"'
                     )
                 mark_processed(service, msg["id"])
-                log_event(vehicle_number, "closed")
+                log_event(vehicle_number, "closed", info=ticket.get("log_info"))
                 print(f"  done: {vehicle_number}")
             except AlreadyCompletedError as e:
                 print(f"  Already {e.status_text}: {vehicle_number}")
@@ -973,7 +1062,7 @@ def process_once(service):
                         f'the current status of the vehicle number : {vehicle_number} is already "Servicing Completed" kindly check and confirm'
                     )
                 mark_processed(service, msg["id"])
-                log_event(vehicle_number, "already_completed", e.status_text)
+                log_event(vehicle_number, "already_completed", e.status_text, info=ticket.get("log_info"))
             except OtherStatusError as e:
                 print(f"  Found under status {e.status_text}: {vehicle_number}")
                 if SEND_REPLIES:
@@ -982,10 +1071,10 @@ def process_once(service):
                         f'the current status of the vehicle number : {vehicle_number} is "{e.status_text}", kindly check and confirm'
                     )
                 mark_processed(service, msg["id"])
-                log_event(vehicle_number, "other_status", e.status_text)
+                log_event(vehicle_number, "other_status", e.status_text, info=ticket.get("log_info"))
             except Exception as e:
                 print(f"  FAILED on {vehicle_number}: {e}")
-                log_event(vehicle_number, "failed", str(e))
+                log_event(vehicle_number, "failed", str(e), info=ticket.get("log_info"))
                 # Deliberately not marking as read / replying, so a failed
                 # ticket isn't silently dropped.
 
@@ -1006,11 +1095,11 @@ def process_once(service):
                 if SEND_REPLIES:
                     send_reply(service, msg, "Done")
                 mark_processed(service, msg["id"])
-                log_event(vehicle_number, "recovery_closed")
+                log_event(vehicle_number, "recovery_closed", info=ticket.get("log_info"))
                 print(f"  recovery done: {vehicle_number}")
             except Exception as e:
                 print(f"  RECOVERY FAILED on {vehicle_number}: {e}")
-                log_event(vehicle_number, "recovery_failed", str(e))
+                log_event(vehicle_number, "recovery_failed", str(e), info=ticket.get("log_info"))
                 # Deliberately not marking as read / replying, per instruction:
                 # if not closed, leave it unread.
 
