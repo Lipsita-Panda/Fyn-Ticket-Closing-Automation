@@ -46,7 +46,7 @@ HEADLESS = os.environ.get("HEADLESS", "false").lower() == "true"
 BROWSER_CHANNEL = os.environ.get("BROWSER_CHANNEL", "msedge") or None
 
 SUBJECT_QUERIES = [
-    "UNDER APPROVAL Service Ticket",
+    "APPROVAL Service Ticket",   # also catches typos before it, e.g. "UNDERd APPROVAL Service Ticket"
     "Service Ticket Status Updated",
     "NEW Service Ticket OPENED",
     "Service ticket to be closed",
@@ -111,6 +111,17 @@ def vendor_location_for(vehicle_number: str) -> str:
 # Email body parsing
 # ---------------------------------------------------------------------------
 
+_ODD_SPACES = re.compile(r"[^\S\n]+")                       # any run of spaces / tabs / non-breaking spaces (not line breaks)
+_INVISIBLE = re.compile("[\u200b\u200c\u200d\u2060\ufeff]")   # zero-width characters
+
+
+def _clean_text(text):
+    """Make every kind of space an ordinary single space and drop invisible
+    characters. Mails often contain non-breaking or doubled spaces that look
+    normal but stop phrases like 'close the vehicle service ticket' matching."""
+    return _ODD_SPACES.sub(" ", _INVISIBLE.sub("", text or ""))
+
+
 def _extract_field(labels, text):
     """labels can be one label or a list of alternate labels to try, in
     order — email formats vary (e.g. 'Vehicle number' vs 'vehicle no')."""
@@ -149,6 +160,8 @@ def parse_ticket_email(body: str, subject: str = ""):
     - None when it's simply not a close instruction, or the email is a
       vehicle-replacement request (nothing to do, no reply needed)
     """
+    body = _clean_text(body)
+    subject = _clean_text(subject)
     body_lower_full = body.lower()
     if "replace the vehicle" in body_lower_full or "replace this vehicle" in body_lower_full:
         # Vehicle-replacement requests aren't ticket closures — leave
@@ -190,7 +203,7 @@ def parse_ticket_email(body: str, subject: str = ""):
     should_close = (
         "close the service ticket" in status_lower
         or "close the vehicle service ticket" in status_lower
-        or "back to same roster" in status_lower
+        or re.search(r"back to (the )?same roster", status_lower) is not None
         or "move this vehicle to rfd" in status_lower
     )
 
@@ -240,9 +253,9 @@ def fetch_ticket_emails(service):
     matched = []
     for stub in stubs:
         msg = service.users().messages().get(userId="me", id=stub["id"], format="full").execute()
-        body = _get_plain_text(msg["payload"]) or ""
+        body = _clean_text(_get_plain_text(msg["payload"]) or "")
         headers = {h["name"]: h["value"] for h in msg["payload"].get("headers", [])}
-        subject = headers.get("Subject", "")
+        subject = _clean_text(headers.get("Subject", ""))
         ticket = parse_ticket_email(body, subject)
 
         if ticket is None:
@@ -296,6 +309,8 @@ def parse_recovery_email(body: str, subject: str = ""):
     Returns a dict with kind="close" / "no_vehicle_number" /
     "vehicle_mismatch", or None if it's not a close instruction.
     """
+    body = _clean_text(body)
+    subject = _clean_text(subject)
     # First: is this mail actually asking to close a recovery ticket? If not
     # (notifications, chatter, ...) do nothing at all - no reply, left unread.
     status_text = _extract_field("Status", body) or ""
@@ -349,9 +364,9 @@ def fetch_recovery_emails(service):
     matched = []
     for stub in stubs:
         msg = service.users().messages().get(userId="me", id=stub["id"], format="full").execute()
-        body = _get_plain_text(msg["payload"]) or ""
+        body = _clean_text(_get_plain_text(msg["payload"]) or "")
         headers = {h["name"]: h["value"] for h in msg["payload"].get("headers", [])}
-        subject = headers.get("Subject", "")
+        subject = _clean_text(headers.get("Subject", ""))
         ticket = parse_recovery_email(body, subject)
 
         if ticket is None:
