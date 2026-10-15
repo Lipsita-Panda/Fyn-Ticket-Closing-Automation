@@ -1,4 +1,10 @@
 date_ist,time_ist,vehicle_number,outcome,detail,ticket_type,mail_received_date,mail_received_time,closed_date,closed_time,replied_date,replied_time,mail_subject,mail_location,vendor_name,repaired_details,mail_status,platform_location,mail_id,timestamp_utc
+2026-10-15,17:06:11,KA 05 AQ 5160,failed,"Page.screenshot: Timeout 30000ms exceeded.
+Call log:
+  - taking page screenshot
+  - waiting for fonts to load...
+  - fonts loaded
+",service,2026-10-15,17:04:17,,,,,Re: UNDER APPROVAL Service Ticket – KA 05 AQ 5160 (OSM),On site,Exponent Rajajinagar,Starting issue resolved.,Add back to The same roster,Vendor - Fyn Mobility Bangalore,1a13f57b191de8dc,2026-10-15T11:36:57+00:00
 2026-10-15,17:01:30,KA 04 AD 7772,closed,,service,2026-10-15,15:22:11,2026-10-15,17:01:43,2026-10-15,17:01:45,Re: UNDERd APPROVAL Service Ticket – KA 04 AD 7772 (Unknown OEM),Begur,ASC Classic motors,Front caliper pipe and brake pads replaced,Add back to The same roster,Vendor - Fyn Mobility Bangalore,1a13efa26693aa66,2026-10-15T11:31:46+00:00
 2026-10-15,16:56:00,KA 04 AD 0284,closed,,service,2026-10-15,16:51:38,2026-10-15,16:56:14,2026-10-15,16:56:15,Re: UNDER APPROVAL Service Ticket – KA 04 AD 0284 (Unknown OEM),On site,FYN Bangalore,Brake issue resolved,Add back to The same roster,Vendor - Fyn Mobility Bangalore,1a13f4c1c1a7a465,2026-10-15T11:26:15+00:00
 2026-10-15,16:51:14,KA 04 AD 5005,closed,,service,2026-10-15,16:47:32,2026-10-15,16:51:34,2026-10-15,16:51:34,Re: UNDER APPROVAL Service Ticket – KA 04 AD 5005 (Unknown OEM),On site,FYN Bangalore,tyre and throttle replaced,Add back to The same roster,Vendor - Fyn Mobility Bangalore,1a13f485ae3ad0dd,2026-10-15T11:21:35+00:00
