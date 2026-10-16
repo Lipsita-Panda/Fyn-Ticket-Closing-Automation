@@ -142,6 +142,18 @@ def _extract_vehicle_from_subject(subject):
     return match.group(1).strip() if match else None
 
 
+_STANDARD_PLATE = re.compile(r"([A-Z]{2})(\d{1,2})([A-Z]{1,3})(\d{4})")
+
+
+def _canonical_plate(text):
+    """'KA05 AN 9101', 'ka05an9101' and 'KA 05 AN 9101' all become
+    'KA 05 AN 9101' - the way the platform stores plates, and the only way
+    its search finds them. Anything that isn't a standard plate is left alone."""
+    compact = re.sub(r"\s+", "", text or "").upper()
+    m = _STANDARD_PLATE.fullmatch(compact)
+    return " ".join(m.groups()) if m else (text or "").strip()
+
+
 def _last4_digits(plate):
     """Just the trailing serial digits (ignoring the district code, which
     is the part most prone to typos), for comparing two plate strings."""
@@ -223,7 +235,7 @@ def parse_ticket_email(body: str, subject: str = ""):
 
     return {
         "kind": "close",
-        "vehicle_number": vehicle_number,
+        "vehicle_number": _canonical_plate(vehicle_number),
         "remarks": repaired_details or "Issue Resolved",
         "status_text": status_text or "",
     }
@@ -349,7 +361,7 @@ def parse_recovery_email(body: str, subject: str = ""):
 
     return {
         "kind": "close",
-        "vehicle_number": vehicle_number,
+        "vehicle_number": _canonical_plate(vehicle_number),
         "remarks": remarks,
     }
 
@@ -574,8 +586,12 @@ def _check_already_completed(page, vehicle_number):
     """When no open record was found (during an actual close attempt),
     check the remaining statuses to report the real reason instead of a
     generic error: Servicing Completed gets its own specific exception,
-    anything else found gets a generic one."""
-    found_status = _find_status_among(page, vehicle_number, [3, 4, 5])
+    anything else found gets a generic one.
+
+    Under Approval is checked FIRST. Almost every vehicle has an OLD
+    Servicing Completed ticket, so checking Completed first made a vehicle
+    whose NEW ticket was still Under Approval look 'already completed'."""
+    found_status = _find_status_among(page, vehicle_number, [4, 3, 5])
     if found_status == "Servicing Completed":
         raise AlreadyCompletedError(found_status)
     if found_status:
@@ -597,6 +613,17 @@ def select_vehicle(page, vehicle_number):
     rows = page.get_by_role("row").filter(has_text=_plate_regex(vehicle_number))
     count = rows.count()
     print(f"  Matching rows found: {count}")
+
+    if count == 0:
+        # Before concluding there is no open ticket, wait a moment and load
+        # the list once more - the page may have been slow, or the ticket may
+        # have only just changed status.
+        page.wait_for_timeout(4000)
+        page.goto(search_url)
+        page.wait_for_load_state("networkidle")
+        rows = page.get_by_role("row").filter(has_text=_plate_regex(vehicle_number))
+        count = rows.count()
+        print(f"  Looked again after a short wait: {count} matching row(s)")
 
     if count == 0:
         _check_already_completed(page, vehicle_number)  # raises if it's already done
