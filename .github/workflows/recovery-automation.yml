@@ -1,0 +1,89 @@
+name: Recovery Ticket Automation
+
+# Separate from the service-ticket workflow (ticket-automation.yml): its own
+# schedule, its own code (recovery_automation.py + recovery_ticket.py) and its
+# own log (logs/recovery_log.csv).
+on:
+  schedule:
+    - cron: '*/5 * * * *'     # GitHub may start these a few minutes late
+  workflow_dispatch:          # "Run workflow" button; also what a cron-job.org job can call
+    inputs:
+      dry_run:
+        description: "Dry run: only SHOW what it would do (no platform changes, no replies, mails stay unread)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: recovery-ticket-automation
+  cancel-in-progress: false   # queue instead of overlapping a run that is still going
+
+permissions:
+  contents: write             # to save the log back to the repo
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-chromium
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+
+      - name: Run recovery automation (single pass)
+        env:
+          PLATFORM_URL: ${{ secrets.PLATFORM_URL }}
+          PLATFORM_USERNAME: ${{ secrets.PLATFORM_USERNAME }}
+          PLATFORM_PASSWORD: ${{ secrets.PLATFORM_PASSWORD }}
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+          GOOGLE_TOKEN_JSON: ${{ secrets.GOOGLE_TOKEN_JSON }}
+          HEADLESS: 'true'
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: python recovery_automation.py
+
+      - name: Commit recovery log
+        id: commit_log
+        run: |
+          if [ -f logs/recovery_log.csv ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add logs/recovery_log.csv
+            git commit -m "Update recovery log" || echo "nothing to commit"
+            # GitHub occasionally rejects a push for a moment, and the service
+            # workflow saves to the same repo - so retry a few times.
+            for attempt in 1 2 3 4 5; do
+              if git pull --rebase && git push; then
+                echo "Log saved."
+                exit 0
+              fi
+              echo "Saving the log failed (attempt $attempt of 5) - retrying shortly..."
+              sleep $((attempt * 10))
+            done
+            echo "Could not save the log after 5 attempts."
+            exit 1
+          else
+            echo "No recovery log yet - nothing to commit."
+          fi
+
+      # Only if saving still failed: keep a copy of this run's log so the
+      # entry can be recovered (Actions run page -> Artifacts).
+      - name: Keep a copy of the log if it could not be saved
+        if: always() && steps.commit_log.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-log-not-saved
+          path: logs/recovery_log.csv
+          retention-days: 30
