@@ -1,2 +1,3 @@
 date_ist,time_ist,vehicle_number,outcome,detail,mail_received_date,mail_received_time,closed_date,closed_time,replied_date,replied_time,mail_subject,recovery_type,remarks,location_used,service_requested,service_description,mail_id,timestamp_utc
+2026-10-30,17:01:24,KA 03 AN 6736,failed,Vehicle Number : KA 03 AN 6736 No open recovery record found.,2026-10-29,17:37:54,,,,,Re: NEW RECOVERY TICKET FOR KA 03 AN 6736 (Atul),Soft,Recovery Done,,yes,the wiring issue,1a1878f727d53a5d,2026-10-30T11:31:36+00:00
 2026-10-30,16:56:18,KA 03 AN 6736,failed,Vehicle Number : KA 03 AN 6736 No open recovery record found.,2026-10-29,17:37:54,,,,,Re: NEW RECOVERY TICKET FOR KA 03 AN 6736 (Atul),Soft,Recovery Done,,yes,the wiring issue,1a1878f727d53a5d,2026-10-30T11:26:32+00:00
