@@ -165,6 +165,9 @@ def choose_vehicle(subject, text):
     return None, "no readable vehicle number" if raw else "no vehicle number"
 
 
+# A mail that mentions "add back" anywhere (subject or what the sender wrote) is NOT
+# closed by the automation: it is left unread for a person to handle.
+ADD_BACK_RE = re.compile(r"\badd[\s\-]*back\b", re.IGNORECASE)
 CLOSE_RE = re.compile(r"close\s+the\s+(?:vehicle\s+)?recovery\s+ticket", re.IGNORECASE)
 # A service ticket is created ONLY when the mail says "close the recovery ticket
 # AND raise/create a service ticket" - the request has to follow the close
@@ -183,10 +186,12 @@ _NOT_A_VALUE = {"-", "--", "na", "n/a", "nil", "none", "null"}
 def parse_mail(subject, body):
     """Returns None when the mail is not a request to close a recovery ticket
     (notifications, chatter, replies that only quote an old request), else a
-    dict with kind 'close' or 'bad_vehicle'."""
+    dict with kind 'close', 'bad_vehicle' or 'add_back' (mentions "add back": leave it alone)."""
     text = _strip_quoted(_clean_text(body))
     if not CLOSE_RE.search(text):
         return None
+    if ADD_BACK_RE.search(text) or ADD_BACK_RE.search(_clean_text(subject)):
+        return {"kind": "add_back"}
 
     plate, problem = choose_vehicle(_clean_text(subject), text)
     if problem:
@@ -389,6 +394,9 @@ def process_once(service, dry_run=False):
         req = parse_mail(subject, body)
         if req is None:
             print(f"[skip] {mid} - not a request to close a recovery ticket (left unread)")
+            continue
+        if req["kind"] == "add_back":
+            print(f"[skip] {mid} - mentions \"add back\": not closing the recovery (left unread)")
             continue
         info = _mail_info(msg, subject, req)
 
