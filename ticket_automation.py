@@ -50,6 +50,7 @@ SUBJECT_QUERIES = [
     "Service Ticket Status Updated",
     "NEW Service Ticket OPENED",
     "Service ticket to be closed",
+    "Kindly close the service ticket",
 ]
 
 
