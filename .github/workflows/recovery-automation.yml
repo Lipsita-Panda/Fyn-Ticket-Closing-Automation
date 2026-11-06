@@ -33,15 +33,26 @@ jobs:
           python-version: '3.11'
 
       - name: Cache Playwright browsers
+        timeout-minutes: 3           # a stuck cache must never hold up ticket closing
+        continue-on-error: true
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-chromium
 
       - name: Install dependencies
+        timeout-minutes: 6
         run: |
           pip install -r requirements.txt
-          playwright install --with-deps chromium
+          # Just the browser. "--with-deps" also downloaded ~20 MB of fonts through apt on
+          # every run, and that download sometimes stalled for minutes. The runner already
+          # has the system libraries the browser needs; the check below installs them only
+          # if the browser ever fails to start.
+          playwright install chromium
+          python -c "from playwright.sync_api import sync_playwright as s; p = s().start(); p.chromium.launch().close(); p.stop(); print('browser starts OK')" || {
+            echo "The browser could not start - installing system libraries..."
+            playwright install-deps chromium
+          }
 
       - name: Run recovery automation (single pass)
         env:
@@ -54,8 +65,11 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run }}
         run: python recovery_automation.py
 
+      # Runs even if an earlier step was stopped, so tickets closed before a stall are still logged.
       - name: Commit recovery log
         id: commit_log
+        if: always()
+        timeout-minutes: 4
         run: |
           if [ -f logs/recovery_log.csv ]; then
             git config user.name "github-actions[bot]"
