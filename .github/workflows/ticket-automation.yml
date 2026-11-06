@@ -41,7 +41,15 @@ jobs:
         timeout-minutes: 6
         run: |
           pip install -r requirements.txt
-          playwright install --with-deps chromium
+          # Just the browser. "--with-deps" also downloaded ~20 MB of fonts through apt on
+          # every run, and that download sometimes stalled for minutes. The runner already
+          # has the system libraries the browser needs; the check below installs them only
+          # if the browser ever fails to start.
+          playwright install chromium
+          python -c "from playwright.sync_api import sync_playwright as s; p = s().start(); p.chromium.launch().close(); p.stop(); print('browser starts OK')" || {
+            echo "The browser could not start - installing system libraries..."
+            playwright install-deps chromium
+          }
 
       - name: Create .env
         run: |
