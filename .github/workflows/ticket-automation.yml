@@ -20,7 +20,7 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15          # a hard stop for the whole run
 
     steps:
       - uses: actions/checkout@v4
@@ -30,12 +30,15 @@ jobs:
           python-version: '3.11'
 
       - name: Cache Playwright browsers
+        timeout-minutes: 3           # a stuck cache must never hold up ticket closing
+        continue-on-error: true
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-chromium
 
       - name: Install dependencies
+        timeout-minutes: 6
         run: |
           pip install -r requirements.txt
           playwright install --with-deps chromium
@@ -51,6 +54,7 @@ jobs:
           EOF
 
       - name: Run ticket automation (single pass)
+        timeout-minutes: 8           # normal runs take 1-3 minutes
         env:
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
           GOOGLE_TOKEN_JSON: ${{ secrets.GOOGLE_TOKEN_JSON }}
@@ -59,15 +63,39 @@ jobs:
           DAILY_SUMMARY_FORCE: ${{ inputs.send_summary_now }}
         run: python run_once.py
 
+      # Runs even if an earlier step was stopped, so tickets closed before a stall are still logged.
       - name: Commit ticket log
+        id: commit_log
+        if: always()
+        timeout-minutes: 4
         run: |
           if [ -d logs ]; then
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git add logs/
             git commit -m "Update ticket log" || echo "nothing to commit"
-            git pull --rebase
-            git push
+            # GitHub occasionally rejects a push for a moment ("fatal error in
+            # commit_refs"). Retry a few times instead of losing the log row.
+            for attempt in 1 2 3 4 5; do
+              if git pull --rebase && git push; then
+                echo "Log saved."
+                exit 0
+              fi
+              echo "Saving the log failed (attempt $attempt of 5) - retrying shortly..."
+              sleep $((attempt * 10))
+            done
+            echo "Could not save the log after 5 attempts."
+            exit 1
           else
             echo "No logs folder yet — nothing to commit."
           fi
+
+      # Only if saving still failed: keep a copy of this run's log so the
+      # entry can be recovered (Actions run page -> Artifacts).
+      - name: Keep a copy of the log if it could not be saved
+        if: always() && steps.commit_log.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ticket-log-not-saved
+          path: logs/
+          retention-days: 30
