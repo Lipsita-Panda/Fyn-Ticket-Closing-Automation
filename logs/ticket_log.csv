@@ -1,4 +1,6 @@
 date_ist,time_ist,vehicle_number,outcome,detail,ticket_type,mail_received_date,mail_received_time,closed_date,closed_time,replied_date,replied_time,mail_subject,mail_location,vendor_name,repaired_details,mail_status,platform_location,mail_id,timestamp_utc
+2026-11-07,14:10:58,KA 05 AP 2373,already_completed,Servicing Completed,service,2026-11-07,14:04:08,,,2026-11-07,14:11:34,Re: UNDER APPROVAL Service Ticket – KA 05 AP 2373 (OSM),Exponent rajajinagar,ASC@Exponent rajajinagar,Starting issue resolved,Add back to same roster,Vendor - Fyn Mobility Bangalore,1a1b52503f857182,2026-11-07T08:41:35+00:00
+2026-11-07,14:10:58,KA 05 AP 5625,closed,,service,2026-11-07,14:08:17,2026-11-07,14:11:18,2026-11-07,14:11:19,Re: UNDER APPROVAL Service Ticket – KA 05 AP 5625 (OSM),On site,FYN Bangalore,Front tyre replaced,Add back to same roster,Vendor - Fyn Mobility Bangalore,1a1b528d50a32e91,2026-11-07T08:41:19+00:00
 2026-11-07,14:05:48,KA 05 AP 2373,failed,"Page.screenshot: Timeout 30000ms exceeded.
 Call log:
   - taking page screenshot
