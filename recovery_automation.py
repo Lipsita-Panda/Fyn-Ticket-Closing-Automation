@@ -56,6 +56,8 @@ POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "60"))
 DEFAULT_REMARKS = "Recovery Done"
 DEFAULT_SERVICE_DESCRIPTION = "General service needs to be done"   # when the mail gives no reason
 BAD_VEHICLE_REPLY = "Kindly mention the correct vehicle number in correct format"
+NO_OPEN_REPLY = "No open recovery ticket found for {plate}, kindly check and confirm"
+NO_OPEN_TEXT = "No open recovery record found"       # what rt.close_recovery_ticket reports when nothing is open
 
 GMAIL_QUERY = (
     '(subject:"NEW RECOVERY TICKET FOR" OR subject:"Recovery ticket to be closed") '
@@ -168,13 +170,18 @@ def choose_vehicle(subject, text):
 # A mail that mentions "add back" anywhere (subject or what the sender wrote) is NOT
 # closed by the automation: it is left unread for a person to handle.
 ADD_BACK_RE = re.compile(r"\badd[\s\-]*back\b", re.IGNORECASE)
-CLOSE_RE = re.compile(r"close\s+the\s+(?:vehicle\s+)?recovery\s+ticket", re.IGNORECASE)
+# "close the recovery ticket", and also "close the recovery and raise ..." / "close recovery ticket".
+# After the word "recovery" there must be "ticket" or the end of the thought, so
+# "close the recovery team" or "disclose the recovery ..." do not count.
+_CLOSE = (r"\bclose\s+(?:the\s+)?(?:vehicle\s+)?recovery"
+          r"(?:\s+ticket\b|(?=[ \t]*(?:\n|$|[.,;:!&]|(?:and|also|then|please|kindly|asap|now|today)\b)))")
+CLOSE_RE = re.compile(_CLOSE, re.IGNORECASE)
 # A service ticket is created ONLY when the mail says "close the recovery ticket
 # AND raise/create a service ticket" - the request has to follow the close
 # instruction directly. A stray mention ("no need to raise a service ticket",
 # "the vendor will raise one later") does not count.
 SERVICE_RE = re.compile(
-    r"close\s+the\s+(?:vehicle\s+)?recovery\s+ticket"
+    _CLOSE +
     r"[\s,&]*(?:(?:and|also|then|plus)[\s,&]*)*"
     r"(?:please\s+|kindly\s+)?(?:raise|create|open|generate)\s+(?:a\s+|an\s+|the\s+|new\s+)?service\s+ticket"
     r"(?:[ \t]+for[ \t]+(?P<desc>[^.\n]*))?",
@@ -341,6 +348,15 @@ def failed_attempts(mail_id):
         return sum(1 for r in csv.DictReader(f) if r.get("mail_id") == mail_id and r.get("outcome") == "failed")
 
 
+def not_found_failures(mail_id):
+    """How many earlier tries on this mail found NO open recovery for the vehicle."""
+    if not os.path.isfile(LOG_FILE):
+        return 0
+    with open(LOG_FILE, newline="", encoding="utf-8", errors="replace") as f:
+        return sum(1 for r in csv.DictReader(f) if r.get("mail_id") == mail_id and r.get("outcome") == "failed"
+                   and NO_OPEN_TEXT in (r.get("detail") or ""))
+
+
 def held_after_unclear_submit(mail_id):
     """True if an earlier try on this mail submitted the form but the recovery
     stayed Open. If that form also asked for a service ticket, a retry could
@@ -441,6 +457,18 @@ def process_once(service, dry_run=False):
                 recovery_type=req["recovery_type"], location_text=req["location_text"],
             )
             if not result["ok"]:
+                if result.get("outcome") == "not_found" and not_found_failures(mid) >= 1:
+                    # Nothing open for this vehicle on two tries in a row (so not a slow page):
+                    # tell the sender, and stop retrying.
+                    text = NO_OPEN_REPLY.format(plate=plate)
+                    times = {}
+                    if SEND_REPLIES:
+                        send_reply(service, msg, text)
+                        times.update(_stamp("replied"))
+                    mark_processed(service, mid)
+                    log_event(plate, "no_open_recovery", "no open recovery ticket on the platform - sender told", {**info, **times})
+                    print(f"  no open recovery for {plate} (checked twice) - replied {text!r} and marked the mail read")
+                    continue
                 raise RuntimeError(result["message"].replace("\n", " "))
         except Exception as e:
             reason = (str(e).strip().splitlines() or [repr(e)])[0][:300]
