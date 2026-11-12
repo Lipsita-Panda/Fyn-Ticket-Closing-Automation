@@ -2,7 +2,7 @@
 Recovery ticket mail automation - SEPARATE from ticket_automation.py.
 
 Watches Gmail for unread mails whose subject STARTS WITH
-    "NEW RECOVERY TICKET FOR"   or   "Recovery ticket to be closed"
+    "NEW RECOVERY TICKET"   or   "Recovery ticket to be closed"
 (any capitals, and "Re:" / "Fwd:" in front is fine), reads the body, closes
 the recovery ticket on the platform (recovery_ticket.py) and replies.
 
@@ -46,7 +46,7 @@ import recovery_ticket as rt
 # ---------------------------------------------------------------------------
 IST = timezone(timedelta(hours=5, minutes=30))
 
-SUBJECT_STARTS = ("new recovery ticket for", "recovery ticket to be closed")
+SUBJECT_STARTS = ("new recovery ticket", "recovery ticket to be closed")   # "NEW RECOVERY TICKET FOR ..." and "new recovery ticket - ..." both count
 MAX_AGE_DAYS = 2             # only mails from the last 2 days (no surprise clean-up of old mail)
 MAX_FAILED_ATTEMPTS = 12     # a mail that keeps failing is retried every 5 min, this many times
 SEND_REPLIES = True
@@ -60,7 +60,7 @@ NO_OPEN_REPLY = "No open recovery ticket found for {plate}, kindly check and con
 NO_OPEN_TEXT = "No open recovery record found"       # what rt.close_recovery_ticket reports when nothing is open
 
 GMAIL_QUERY = (
-    '(subject:"NEW RECOVERY TICKET FOR" OR subject:"Recovery ticket to be closed") '
+    '(subject:"NEW RECOVERY TICKET" OR subject:"Recovery ticket to be closed") '
     f"is:unread -from:me newer_than:{MAX_AGE_DAYS}d"
 )
 
